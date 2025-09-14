@@ -21,7 +21,7 @@ on:
 
 env:
   R_VERSION: ${{ github.event.inputs.r_version || '4.5.1' }}
-  MAKEFLAGS: "-j 2"
+  MAKEFLAGS: "-j$(nproc)"
 
 jobs:
   build:
