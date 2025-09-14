@@ -117,6 +117,11 @@ deps-ubuntu:
 		libbz2-dev \
 		liblzma-dev \
 		libpcre3-dev \
+		librsvg2-dev \
+		libudunits2-dev \
+		libharfbuzz-dev \
+		libfribidi-dev \
+		libfuse2t64 \
 		zlib1g-dev
 	@if [ "$(ARCH_NAME)" = "aarch64" ]; then \
 		echo "$(BLUE)Installing ARM64 packages...$(NC)"; \
@@ -157,6 +162,12 @@ deps-fedora:
 		libXext-devel \
 		libXmu-devel \
 		bzip2-devel \
+		harfbuzz-devel \
+		fribidi-devel \
+		librsvg2-devel \
+		udunits2-devel \
+		fuse \ 
+		fuse-libs \
 		xz-devel \
 		pcre-devel \
 		zlib-devel
@@ -188,9 +199,16 @@ deps-centos:
 		libXext-devel \
 		libXmu-devel \
 		bzip2-devel \
+		harfbuzz-devel \
+		fribidi-devel \
+		librsvg2-devel \
+		udunits2-devel \
 		xz-devel \
 		pcre-devel \
 		zlib-devel
+	sudo yum --enablerepo=epel -y install fuse-sshfs # install from EPEL
+	user="$(whoami)"
+	sudo usermod -a -G fuse "$user" 
 	@echo "$(GREEN)CentOS/RHEL dependencies installed$(NC)"
 
 .PHONY: test
