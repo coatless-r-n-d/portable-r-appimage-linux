@@ -21,6 +21,7 @@ on:
 
 env:
   R_VERSION: ${{ github.event.inputs.r_version || '4.5.1' }}
+  MAKEFLAGS: "-j 2"
 
 jobs:
   build:
@@ -33,7 +34,7 @@ jobs:
           - os: ubuntu-24.04
             arch: x86_64
             arch_name: x86_64
-          - os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
             arch: aarch64
             arch_name: aarch64
     
@@ -173,6 +174,29 @@ jobs:
         find artifacts -name "*.AppImage" -exec cp {} release-assets/ \;
         find artifacts -name "build-summary-*.txt" -exec cp {} release-assets/ \;
         
+        # Verify we have both architectures
+        echo "Checking for required AppImages:"
+        x86_64_found=false
+        aarch64_found=false
+        
+        for appimage in release-assets/*.AppImage; do
+          if [[ "$appimage" == *"x86_64"* ]]; then
+            echo "[OK] Found x86_64 AppImage: $(basename "$appimage")"
+            x86_64_found=true
+          elif [[ "$appimage" == *"aarch64"* ]]; then
+            echo "[OK] Found aarch64 AppImage: $(basename "$appimage")"
+            aarch64_found=true
+          fi
+        done
+        
+        if [ "$x86_64_found" = false ]; then
+          echo "WARNING: x86_64 AppImage not found"
+        fi
+        
+        if [ "$aarch64_found" = false ]; then
+          echo "WARNING: aarch64 AppImage not found"
+        fi
+        
         # Create combined build summary
         echo "R AppImage Build Summary" > release-assets/README.txt
         echo "========================" >> release-assets/README.txt
@@ -184,15 +208,19 @@ jobs:
         echo "" >> release-assets/README.txt
         
         echo "Built AppImages:" >> release-assets/README.txt
+        appimage_count=0
         for appimage in release-assets/*.AppImage; do
           if [ -f "$appimage" ]; then
             filename=$(basename "$appimage")
             size=$(du -h "$appimage" | cut -f1)
             sha256=$(sha256sum "$appimage" | cut -d' ' -f1)
             echo "  - $filename ($size, SHA256: $sha256)" >> release-assets/README.txt
+            appimage_count=$((appimage_count + 1))
           fi
         done
         
+        echo "" >> release-assets/README.txt
+        echo "Total AppImages: $appimage_count" >> release-assets/README.txt
         echo "" >> release-assets/README.txt
         echo "Usage:" >> release-assets/README.txt
         echo "  Download the appropriate AppImage for your architecture" >> release-assets/README.txt
@@ -202,6 +230,7 @@ jobs:
         echo "This is an immutable R environment with pre-installed packages." >> release-assets/README.txt
         echo "Package installation is disabled to maintain consistency." >> release-assets/README.txt
         
+        echo "Final release assets:"
         ls -la release-assets/
 
     - name: Extract tag name
