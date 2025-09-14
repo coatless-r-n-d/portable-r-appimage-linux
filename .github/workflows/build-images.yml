@@ -48,13 +48,6 @@ jobs:
         echo "ARCH_NAME=${{ matrix.arch_name }}" >> $GITHUB_ENV
         echo "APPIMAGE_NAME=R-${{ env.R_VERSION }}-${{ matrix.arch_name }}.AppImage" >> $GITHUB_ENV
 
-    - name: Setup cross-compilation for aarch64
-      if: matrix.arch == 'aarch64'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y qemu-user-static binfmt-support
-        sudo update-binfmts --enable qemu-aarch64
-
     - name: Install build dependencies
       run: |
         # Update package lists
