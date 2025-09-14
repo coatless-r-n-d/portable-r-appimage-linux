@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# R AppImage Builder Script
+# R AppImage Builder Script with Pre-installed Packages
 # This script creates a portable R AppImage for Linux distributions
 # Supports both x86_64 and aarch64 architectures
-# Includes official R logo, pre-configured repositories, and versioned user libraries
+# Includes official R logo, pre-configured repositories, and pre-installed packages
 
 set -e
 
@@ -28,6 +28,26 @@ R_VERSION="${R_VERSION:-4.5.1}"
 APPIMAGE_NAME="R-${R_VERSION}-${ARCH_NAME}.AppImage"
 BUILD_DIR="$(pwd)/build"
 APPDIR="${BUILD_DIR}/R.AppDir"
+
+# Pre-installed packages configuration
+# Add or remove packages as needed
+PREINSTALLED_PACKAGES=(
+    "jsonlite"
+    "httr"
+    "ggplot2"
+    "dplyr"
+    "tidyr"
+    "readr"
+    "stringr"
+    "lubridate"
+    "shiny"
+    "rmarkdown"
+    "knitr"
+    "devtools"
+    "data.table"
+    "plotly"
+    "DT"
+)
 
 # Colors for output
 RED='\033[0;31m'
@@ -71,11 +91,6 @@ check_dependencies() {
         log_info "  Ubuntu/Debian: make deps  (or: make deps-ubuntu)"
         log_info "  Fedora:        make deps  (or: make deps-fedora)"
         log_info "  CentOS/RHEL:   make deps  (or: make deps-centos)"
-        log_info ""
-        log_info "Or install manually:"
-        log_info "  Ubuntu/Debian: sudo apt-get install build-essential gfortran curl wget file desktop-file-utils libx11-dev libxt-dev"
-        log_info "  Fedora:        sudo dnf install gcc-gfortran curl wget file desktop-file-utils libX11-devel libXt-devel"
-        log_info "  CentOS/RHEL:   sudo yum install gcc-gfortran curl wget file desktop-file-utils libX11-devel libXt-devel"
         exit 1
     fi
     
@@ -190,9 +205,112 @@ build_r() {
     log_success "R built and installed to AppDir for ${ARCH_NAME}"
 }
 
-# Create R profile with default repositories
+# Install R packages during build
+install_r_packages() {
+    log_info "Installing pre-configured R packages..."
+    
+    if [ ${#PREINSTALLED_PACKAGES[@]} -eq 0 ]; then
+        log_info "No packages configured for installation"
+        return 0
+    fi
+    
+    local r_binary="${APPDIR}/usr/bin/R"
+    local lib_dir="${APPDIR}/usr/lib/R/library"
+    
+    # Verify R is working
+    if ! "$r_binary" --version > /dev/null 2>&1; then
+        log_error "R binary not working. Cannot install packages."
+        exit 1
+    fi
+    
+    # Set up temporary environment for package installation
+    export R_HOME="${APPDIR}/usr/lib/R"
+    export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
+    export PATH="${APPDIR}/usr/bin:${PATH}"
+    
+    log_info "Installing ${#PREINSTALLED_PACKAGES[@]} packages..."
+    
+    # Create R script for package installation
+    local install_script="${BUILD_DIR}/install_packages.R"
+    cat > "$install_script" << EOF
+# Set repositories
+options(repos = c(
+    CRAN = "https://cloud.r-project.org",
+    source = "https://packagemanager.rstudio.com/all/latest"
+))
+
+# Set library path
+.libPaths("${lib_dir}")
+
+# Function to install a package with error handling
+install_package_safe <- function(pkg) {
+    cat("Installing package:", pkg, "\n")
+    tryCatch({
+        if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+            install.packages(pkg, lib = "${lib_dir}", dependencies = TRUE, quiet = FALSE)
+            if (require(pkg, character.only = TRUE, quietly = TRUE)) {
+                cat("[OK] Successfully installed:", pkg, "\n")
+                return(TRUE)
+            } else {
+                cat("[ERROR] Failed to load after installation:", pkg, "\n")
+                return(FALSE)
+            }
+        } else {
+            cat("[OK] Already available:", pkg, "\n")
+            return(TRUE)
+        }
+    }, error = function(e) {
+        cat("[ERROR] Error installing", pkg, ":", conditionMessage(e), "\n")
+        return(FALSE)
+    })
+}
+
+# Install packages
+packages <- c($(printf '"%s",' "${PREINSTALLED_PACKAGES[@]}" | sed 's/,$//'))
+results <- sapply(packages, install_package_safe)
+
+# Summary
+successful <- sum(results)
+total <- length(packages)
+cat("\nPackage installation summary:\n")
+cat("Successfully installed:", successful, "out of", total, "packages\n")
+
+if (successful < total) {
+    failed_packages <- packages[!results]
+    cat("Failed packages:", paste(failed_packages, collapse = ", "), "\n")
+}
+
+# List all installed packages
+cat("\nAll installed packages:\n")
+installed_pkgs <- installed.packages(lib.loc = "${lib_dir}")[, "Package"]
+cat(paste(sort(installed_pkgs), collapse = ", "), "\n")
+
+# Exit with error code if any packages failed
+if (successful < total) {
+    quit(status = 1)
+} else {
+    quit(status = 0)
+}
+EOF
+    
+    log_info "Running package installation script..."
+    if "$r_binary" --slave < "$install_script"; then
+        log_success "All packages installed successfully"
+    else
+        log_warning "Some packages failed to install, but continuing with build"
+    fi
+    
+    # Clean up
+    rm -f "$install_script"
+    
+    # Show final package count
+    local pkg_count=$(find "${lib_dir}" -maxdepth 1 -type d | wc -l)
+    log_info "Total packages in library: $((pkg_count - 1))" # Subtract 1 for the library dir itself
+}
+
+# Create R profile with immutable configuration
 create_r_profile() {
-    log_info "Creating R profile with default repositories..."
+    log_info "Creating R profile with immutable configuration..."
     
     local r_etc_dir="${APPDIR}/usr/lib/R/etc"
     local rprofile_site="${r_etc_dir}/Rprofile.site"
@@ -200,12 +318,19 @@ create_r_profile() {
     # Ensure the etc directory exists
     mkdir -p "${r_etc_dir}"
     
-    # Create Rprofile.site with repository configuration
-    cat > "${rprofile_site}" << 'EOF'
+    # Create list of pre-installed packages for display
+    local packages_list=""
+    for pkg in "${PREINSTALLED_PACKAGES[@]}"; do
+        packages_list="$packages_list\"$pkg\", "
+    done
+    packages_list=${packages_list%, }  # Remove trailing comma and space
+    
+    # Create Rprofile.site with immutable configuration
+    cat > "${rprofile_site}" << EOF
 # Rprofile.site for R AppImage
 # This file is executed at R startup
 
-# Set default repositories for package installation
+# Set default repositories (for reference only)
 local({
     r <- getOption("repos")
     r["CRAN"] <- "https://cloud.r-project.org"
@@ -213,16 +338,91 @@ local({
     options(repos = r)
 })
 
+# Pre-installed packages in this AppImage
+.preinstalled_packages <- c($packages_list)
+
+# Override install.packages to prevent installation
+install.packages <- function(...) {
+    cat("\\n")
+    cat("════════════════════════════════════════════════════════════════\\n")
+    cat("    This is an immutable R AppImage environment\\n")
+    cat("════════════════════════════════════════════════════════════════\\n")
+    cat("\\n")
+    cat("Package installation is disabled to maintain consistency.\\n")
+    cat("\\n")
+    cat("Pre-installed packages:\\n")
+    
+    # Display packages in columns
+    packages_per_row <- 3
+    for (i in seq_along(.preinstalled_packages)) {
+        cat(sprintf("  %-20s", .preinstalled_packages[i]))
+        if (i %% packages_per_row == 0 || i == length(.preinstalled_packages)) {
+            cat("\\n")
+        }
+    }
+    
+    cat("\\n")
+    cat("To check if a package is available:\\n")
+    cat("   > library(package_name)\\n")
+    cat("   > require(package_name)\\n")
+    cat("\\n")
+    cat("Need different packages? Build a custom AppImage with:\\n")
+    cat("   > Edit PREINSTALLED_PACKAGES in build script\\n")
+    cat("   > Run: make rebuild-all\\n")
+    cat("\\n")
+    cat("════════════════════════════════════════════════════════════════\\n")
+    cat("\\n")
+}
+
+# Override remove.packages to prevent removal
+remove.packages <- function(...) {
+    cat("\\n[ERROR] Package removal is disabled in this immutable environment.\\n\\n")
+}
+
+# Override update.packages to prevent updates
+update.packages <- function(...) {
+    cat("\\n[ERROR] Package updates are disabled in this immutable environment.\\n\\n")
+}
+
+# Helper function to show available packages
+show.available.packages <- function() {
+    cat("\\nPre-installed packages in this AppImage:\\n\\n")
+    
+    # Get actually installed packages
+    installed <- installed.packages()[, "Package"]
+    available_preinstalled <- intersect(.preinstalled_packages, installed)
+    
+    if (length(available_preinstalled) > 0) {
+        packages_per_row <- 3
+        for (i in seq_along(available_preinstalled)) {
+            cat(sprintf("  %-20s", available_preinstalled[i]))
+            if (i %% packages_per_row == 0 || i == length(available_preinstalled)) {
+                cat("\\n")
+            }
+        }
+    }
+    
+    cat("\\n")
+    cat("Total:", length(available_preinstalled), "pre-installed packages\\n")
+    cat("\\nUse library(package_name) to load a package.\\n\\n")
+}
+
 # Display AppImage startup message
 if (interactive()) {
-    cat("R AppImage - Portable R Environment\n")
-    cat("Default repositories configured:\n")
-    cat("  CRAN: https://cloud.r-project.org\n")
-    cat("  Source: https://packagemanager.rstudio.com/all/latest\n\n")
+    cat("\\n")
+    cat("R AppImage - Immutable Environment\\n")
+    cat("═══════════════════════════════════════\\n")
+    cat("R Version:", R.version.string, "\\n")
+    cat("Architecture: ${ARCH_NAME}\\n")
+    cat("Pre-installed packages:", length(.preinstalled_packages), "\\n")
+    cat("\\n")
+    cat("Type 'show.available.packages()' to see all packages\\n")
+    cat("Package installation is disabled for consistency\\n")
+    cat("\\n")
 }
 EOF
     
-    log_success "R profile created with default repositories"
+    log_success "R profile created with immutable configuration"
 }
 
 # Copy required libraries
@@ -299,8 +499,8 @@ create_desktop_file() {
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=R
-Comment=R Statistical Computing Environment
+Name=R (Immutable)
+Comment=R Statistical Computing Environment - Pre-configured
 Exec=R
 Icon=R
 Categories=Science;Math;
@@ -372,9 +572,6 @@ create_icon() {
         fi
     else
         log_error "No SVG converter found. Please install one of: imagemagick, librsvg2-bin, or inkscape"
-        log_info "Installing ImageMagick: sudo apt-get install imagemagick"
-        log_info "Installing rsvg-convert: sudo apt-get install librsvg2-bin"
-        log_info "Installing Inkscape: sudo apt-get install inkscape"
         exit 1
     fi
     
@@ -387,7 +584,6 @@ create_icon() {
     # Copy icon to AppDir root (required by appimagetool)
     if cp "$icon_path" "$root_icon_path"; then
         log_success "Icon copied to AppDir root"
-        log_info "Icon size: $(ls -lh "$root_icon_path" | awk '{print $5}')"
     else
         log_error "Failed to copy icon to AppDir root"
         exit 1
@@ -400,42 +596,37 @@ create_icon() {
 create_apprun() {
     log_info "Creating AppRun script..."
     
-    cat > "${APPDIR}/AppRun" << EOF
+    cat > "${APPDIR}/AppRun" << 'EOF'
 #!/bin/bash
 
-# AppRun script for R AppImage
+# AppRun script for R AppImage (Immutable Environment)
 
 # Get the directory where this script is located
-HERE="\$(dirname "\$(readlink -f "\$0")")"
+HERE="$(dirname "$(readlink -f "$0")")"
 
-# Clear any existing R environment variables to avoid conflicts
-unset R_HOME R_LIBS_USER R_SHARE_DIR R_INCLUDE_DIR R_DOC_DIR
+# Clear any existing R environment variables to avoid conflicts and warnings
+unset R_HOME R_LIBS_USER R_SHARE_DIR R_INCLUDE_DIR R_DOC_DIR R_LIBS R_ENVIRON R_PROFILE
 
 # Set up environment for AppImage R
-export PATH="\${HERE}/usr/bin:\${PATH}"
-export LD_LIBRARY_PATH="\${HERE}/usr/lib:\${LD_LIBRARY_PATH}"
-export R_HOME="\${HERE}/usr/lib/R"
+export PATH="${HERE}/usr/bin:${PATH}"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+export R_HOME="${HERE}/usr/lib/R"
 
-# Set up user-writable library directory with AppImage and version info
-R_USER_LIB_DIR="\${HOME}/.local/lib/R/AppImage/${R_VERSION}/library"
-mkdir -p "\${R_USER_LIB_DIR}"
-export R_LIBS_USER="\${R_USER_LIB_DIR}"
+# Use only the built-in library (no user library for immutable environment)
+export R_LIBS="${HERE}/usr/lib/R/library"
 
 # Ensure R can find its resources
-export R_SHARE_DIR="\${HERE}/usr/share/R/share"
-export R_INCLUDE_DIR="\${HERE}/usr/share/R/include"
-export R_DOC_DIR="\${HERE}/usr/share/R/doc"
-
-# Set up additional R environment variables for package installation
-export R_LIBS="\${R_USER_LIB_DIR}:\${HERE}/usr/lib/R/library"
+export R_SHARE_DIR="${HERE}/usr/share/R/share"
+export R_INCLUDE_DIR="${HERE}/usr/share/R/include"
+export R_DOC_DIR="${HERE}/usr/share/R/doc"
 
 # Launch R with any arguments passed
-exec "\${HERE}/usr/bin/R" "\$@"
+exec "${HERE}/usr/bin/R" "$@"
 EOF
     
     chmod +x "${APPDIR}/AppRun"
     
-    log_success "AppRun script created with versioned user library support"
+    log_success "AppRun script created for immutable environment"
 }
 
 # Create .DirIcon
@@ -509,12 +700,13 @@ test_appimage() {
 # Show build summary
 show_summary() {
     log_info ""
-    log_info "======================================"
+    log_info "================================================================"
     log_success "R AppImage Build Summary"
-    log_info "======================================"
+    log_info "================================================================"
     log_info "Architecture: ${ARCH_NAME}"
     log_info "R Version: ${R_VERSION}"
     log_info "AppImage: ${BUILD_DIR}/${APPIMAGE_NAME}"
+    log_info "Pre-installed packages: ${#PREINSTALLED_PACKAGES[@]}"
     
     if [ -f "${BUILD_DIR}/${APPIMAGE_NAME}" ]; then
         local size=$(du -h "${BUILD_DIR}/${APPIMAGE_NAME}" | cut -f1)
@@ -522,20 +714,20 @@ show_summary() {
     fi
     
     log_info ""
-    log_info "Usage examples:"
-    log_info "  Interactive R:     ./build/${APPIMAGE_NAME}"
-    log_info "  Run script:        ./build/${APPIMAGE_NAME} script.R"
-    log_info "  Batch mode:        ./build/${APPIMAGE_NAME} --slave -e \"print('Hello')\""
-    log_info "  Install packages:  ./build/${APPIMAGE_NAME} -e \"install.packages('ggplot2')\""
+    log_info "[PACKAGES] Pre-installed packages:"
+    printf '  %s\n' "${PREINSTALLED_PACKAGES[@]}" | sort
+    
     log_info ""
-    log_info "Package management:"
-    log_info "  User library:      ~/.local/lib/R/AppImage/${R_VERSION}/library"
-    log_info "  Auto-configured repos: CRAN + RStudio Package Manager"
+    log_info "Usage examples:"
+    log_info "  Interactive R:     ./${APPIMAGE_NAME}"
+    log_info "  Run script:        ./${APPIMAGE_NAME} script.R"
+    log_info "  Batch mode:        ./${APPIMAGE_NAME} --slave -e \"print('Hello')\""
+    log_info "  Show packages:     ./${APPIMAGE_NAME} -e \"show.available.packages()\""
     log_info ""
     log_info "System integration:"
     log_info "  Install to PATH:   make install"
     log_info "  Desktop entry:     make desktop-integration"
-    log_info "======================================"
+    log_info "================================================================"
 }
 
 # Main function
@@ -544,12 +736,14 @@ main() {
     log_info "Target Architecture: ${ARCH_NAME}"
     log_info "R Version: ${R_VERSION}"
     log_info "Build directory: ${BUILD_DIR}"
+    log_info "Pre-installing ${#PREINSTALLED_PACKAGES[@]} packages"
     log_info "Timestamp: $(date)"
     
     check_dependencies
     download_appimagetool
     create_appdir_structure
     build_r
+    install_r_packages
     create_r_profile
     copy_libraries
     create_desktop_file
