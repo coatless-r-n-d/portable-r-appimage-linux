@@ -122,6 +122,8 @@ deps-ubuntu:
 		libharfbuzz-dev \
 		libfribidi-dev \
 		libfuse2t64 \
+		libgdal-dev \
+		gdal-bin \
 		zlib1g-dev
 	@if [ "$(ARCH_NAME)" = "aarch64" ]; then \
 		echo "$(BLUE)Installing ARM64 packages...$(NC)"; \
@@ -166,7 +168,8 @@ deps-fedora:
 		fribidi-devel \
 		librsvg2-devel \
 		udunits2-devel \
-		fuse \ 
+		gdal \
+		gdal-devel \
 		fuse-libs \
 		xz-devel \
 		pcre-devel \
