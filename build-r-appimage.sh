@@ -592,7 +592,7 @@ create_icon() {
     cd - > /dev/null
 }
 
-# Create AppRun script
+# Create AppRun script using AppImage's built-in $APPDIR
 create_apprun() {
     log_info "Creating AppRun script..."
     
@@ -600,33 +600,73 @@ create_apprun() {
 #!/bin/bash
 
 # AppRun script for R AppImage (Immutable Environment)
+# Uses AppImage's built-in $APPDIR environment variable
 
-# Get the directory where this script is located
-HERE="$(dirname "$(readlink -f "$0")")"
+# The AppImage runtime sets $APPDIR to the mounted filesystem root
+# e.g., /tmp/.mount_R-4.5.7JgTVP
+# This is different from the build-time APPDIR variable!
 
-# Clear any existing R environment variables to avoid conflicts and warnings
+# Clear any existing R environment variables to avoid conflicts
 unset R_HOME R_LIBS_USER R_SHARE_DIR R_INCLUDE_DIR R_DOC_DIR R_LIBS R_ENVIRON R_PROFILE
 
-# Set up environment for AppImage R
-export PATH="${HERE}/usr/bin:${PATH}"
-export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-export R_HOME="${HERE}/usr/lib/R"
+# Debug: Show AppImage environment (comment out for production)
+# echo "DEBUG: APPDIR (mounted filesystem): $APPDIR" >&2
+# echo "DEBUG: APPIMAGE (file path): $APPIMAGE" >&2
+
+# Verify the AppImage environment variable is set
+if [ -z "$APPDIR" ]; then
+    echo "ERROR: APPDIR environment variable not set" >&2
+    echo "This script must be run from within an AppImage" >&2
+    exit 1
+fi
+
+# Verify critical directories exist
+if [ ! -d "$APPDIR/usr/lib/R" ]; then
+    echo "ERROR: R installation not found at $APPDIR/usr/lib/R" >&2
+    echo "AppImage may be corrupted or built incorrectly" >&2
+    ls -la "$APPDIR/usr/" >&2 || true
+    exit 1
+fi
+
+if [ ! -x "$APPDIR/usr/bin/R" ]; then
+    echo "ERROR: R binary not found or not executable at $APPDIR/usr/bin/R" >&2
+    exit 1
+fi
+
+# Set up environment using AppImage's mounted filesystem
+export PATH="$APPDIR/usr/bin:${PATH}"
+export LD_LIBRARY_PATH="$APPDIR/usr/lib:${LD_LIBRARY_PATH}"
+
+# CRITICAL: Set R_HOME to the AppImage mounted location
+export R_HOME="$APPDIR/usr/lib/R"
 
 # Use only the built-in library (no user library for immutable environment)
-export R_LIBS="${HERE}/usr/lib/R/library"
+export R_LIBS="$APPDIR/usr/lib/R/library"
+export R_LIBS_SITE="$APPDIR/usr/lib/R/site-library"
 
-# Ensure R can find its resources
-export R_SHARE_DIR="${HERE}/usr/share/R/share"
-export R_INCLUDE_DIR="${HERE}/usr/share/R/include"
-export R_DOC_DIR="${HERE}/usr/share/R/doc"
+# Ensure R can find its resources in the AppImage
+export R_SHARE_DIR="$APPDIR/usr/share/R/share"
+export R_INCLUDE_DIR="$APPDIR/usr/share/R/include" 
+export R_DOC_DIR="$APPDIR/usr/share/R/doc"
 
-# Launch R with any arguments passed
-exec "${HERE}/usr/bin/R" "$@"
+# Set up additional paths that R might need
+export R_ENVIRON_USER=""  # Disable user environ file
+export R_PROFILE_USER=""  # Disable user profile file
+
+# Verify R can find its critical files
+if [ ! -f "$R_HOME/etc/Renviron" ]; then
+    echo "WARNING: R environment file not found at $R_HOME/etc/Renviron" >&2
+    echo "Available files in $R_HOME/etc/:" >&2
+    ls -la "$R_HOME/etc/" >&2 || true
+fi
+
+# Launch R from the AppImage with any arguments passed
+exec "$APPDIR/usr/bin/R" "$@"
 EOF
     
     chmod +x "${APPDIR}/AppRun"
     
-    log_success "AppRun script created for immutable environment"
+    log_success "AppRun script created"
 }
 
 # Create .DirIcon
