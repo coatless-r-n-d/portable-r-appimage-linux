@@ -3,6 +3,13 @@
 # It runs on GitHub-hosted Ubuntu runners (24.04 and 24.04-arm)
 # The resulting AppImages and build summaries are uploaded as artifacts
 # Optionally, a GitHub Release can be created with the built AppImages
+#
+# Build Types:
+#   - minimal: Base R only (~150MB, fast build ~15min)
+#   - packages: With pre-installed packages (~300MB+, slower build ~45min)  
+#   - both: Build both minimal and packages variants
+#
+# Default: minimal builds only for all architectures
 
 name: Build R AppImage
 
@@ -19,6 +26,15 @@ on:
         required: false
         default: '4.5.1'
         type: string
+      build_type:
+        description: 'Build Type'
+        required: false
+        default: 'minimal'
+        type: choice
+        options:
+          - 'minimal'
+          - 'packages'
+          - 'both'
       create_release:
         description: 'Create GitHub Release'
         required: false
@@ -27,34 +43,74 @@ on:
 
 env:
   R_VERSION: ${{ github.event.inputs.r_version || '4.5.1' }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'minimal' }}
   MAKEFLAGS: "-j 3"  # Limit to 3 parallel jobs to reduce memory usage
 
 jobs:
   build:
-    name: Build R AppImage
+    name: Build R AppImage (${{ matrix.build_type }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # x86_64 builds
           - os: ubuntu-24.04
             arch: x86_64
             arch_name: x86_64
+            build_type: minimal
+          - os: ubuntu-24.04
+            arch: x86_64
+            arch_name: x86_64
+            build_type: packages
+          # aarch64 builds  
           - os: ubuntu-24.04-arm
             arch: aarch64
             arch_name: aarch64
+            build_type: minimal
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            arch_name: aarch64
+            build_type: packages
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
 
+    - name: Check if build should run
+      id: should_build
+      run: |
+        if [[ "${{ matrix.build_type }}" == "minimal" ]]; then
+          echo "Build minimal: Always enabled"
+          echo "should_build=true" >> $GITHUB_OUTPUT
+        elif [[ "${{ matrix.build_type }}" == "packages" ]]; then
+          if [[ "${{ env.BUILD_TYPE }}" == "packages" || "${{ env.BUILD_TYPE }}" == "both" ]]; then
+            echo "Build packages: Enabled (BUILD_TYPE=${{ env.BUILD_TYPE }})"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "Build packages: Skipped (BUILD_TYPE=${{ env.BUILD_TYPE }})"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+        fi
+
     - name: Set up environment variables
+      if: steps.should_build.outputs.should_build == 'true'
       run: |
         echo "R_VERSION=${{ env.R_VERSION }}" >> $GITHUB_ENV
         echo "ARCH_NAME=${{ matrix.arch_name }}" >> $GITHUB_ENV
-        echo "APPIMAGE_NAME=R-${{ env.R_VERSION }}-${{ matrix.arch_name }}.AppImage" >> $GITHUB_ENV
+        echo "BUILD_TYPE_NAME=${{ matrix.build_type }}" >> $GITHUB_ENV
+        
+        # Set AppImage name based on build type
+        if [[ "${{ matrix.build_type }}" == "packages" ]]; then
+          echo "APPIMAGE_NAME=R-${{ env.R_VERSION }}-${{ matrix.arch_name }}-packages.AppImage" >> $GITHUB_ENV
+          echo "ARTIFACT_SUFFIX=packages" >> $GITHUB_ENV
+        else
+          echo "APPIMAGE_NAME=R-${{ env.R_VERSION }}-${{ matrix.arch_name }}.AppImage" >> $GITHUB_ENV
+          echo "ARTIFACT_SUFFIX=minimal" >> $GITHUB_ENV
+        fi
 
     - name: Install build dependencies
+      if: steps.should_build.outputs.should_build == 'true'
       run: |
         # Update package lists
         sudo apt-get update
@@ -63,32 +119,53 @@ jobs:
         make deps-ubuntu
 
     - name: Verify build script
+      if: steps.should_build.outputs.should_build == 'true'
       run: |
         make validate
         make arch-info
         make os-info
 
     - name: Show build configuration
+      if: steps.should_build.outputs.should_build == 'true'
       run: |
         echo "Building R AppImage:"
         echo "  R Version: ${{ env.R_VERSION }}"
         echo "  Architecture: ${{ matrix.arch_name }}"
+        echo "  Build Type: ${{ matrix.build_type }}"
         echo "  OS: ${{ matrix.os }}"
         echo "  Expected output: ${{ env.APPIMAGE_NAME }}"
-        make show-packages
+        
+        if [[ "${{ matrix.build_type }}" == "packages" ]]; then
+          make show-packages
+        else
+          echo "  Build: Minimal (base R packages only)"
+        fi
 
     - name: Build R AppImage
+      if: steps.should_build.outputs.should_build == 'true'
       run: |
         # Set environment variable for AppImage extraction if FUSE is not available
         export APPIMAGE_EXTRACT_AND_RUN=1
         
-        # Build the AppImage
-        make appimage
+        # Build the AppImage using appropriate target
+        if [[ "${{ matrix.build_type }}" == "packages" ]]; then
+          echo "Building R AppImage with pre-installed packages..."
+          make appimage-packages
+        else
+          echo "Building minimal R AppImage..."
+          make appimage
+        fi
       timeout-minutes: 240  # 4 hours timeout for ARM64 builds
 
     - name: Test AppImage
+      if: steps.should_build.outputs.should_build == 'true'
       run: |
-        make test
+        # Test using make targets
+        if [[ "${{ matrix.build_type }}" == "packages" ]]; then
+          make test-packages
+        else
+          make test-minimal
+        fi
         
         # Additional tests
         if [ -f "build/${{ env.APPIMAGE_NAME }}" ]; then
@@ -101,7 +178,11 @@ jobs:
           
           # Test immutable features
           echo "Testing immutable features:"
-          make test-immutable || true
+          if [[ "${{ matrix.build_type }}" == "packages" ]]; then
+            # Test show.available.packages for packages build
+            "./build/${{ env.APPIMAGE_NAME }}" -e "show.available.packages()" || true
+          fi
+          "./build/${{ env.APPIMAGE_NAME }}" -e "install.packages('nonexistent')" || true
           
           # Get file info
           echo "AppImage file info:"
@@ -110,41 +191,43 @@ jobs:
         fi
 
     - name: Generate build summary
+      if: steps.should_build.outputs.should_build == 'true'
       run: |
-        make status > build-summary-${{ matrix.arch_name }}.txt
-        echo "" >> build-summary-${{ matrix.arch_name }}.txt
-        echo "Build Information:" >> build-summary-${{ matrix.arch_name }}.txt
-        echo "  Workflow: ${{ github.workflow }}" >> build-summary-${{ matrix.arch_name }}.txt
-        echo "  Run ID: ${{ github.run_id }}" >> build-summary-${{ matrix.arch_name }}.txt
-        echo "  Repository: ${{ github.repository }}" >> build-summary-${{ matrix.arch_name }}.txt
-        echo "  Commit: ${{ github.sha }}" >> build-summary-${{ matrix.arch_name }}.txt
-        echo "  Ref: ${{ github.ref }}" >> build-summary-${{ matrix.arch_name }}.txt
-        echo "  Actor: ${{ github.actor }}" >> build-summary-${{ matrix.arch_name }}.txt
-        echo "  Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> build-summary-${{ matrix.arch_name }}.txt
+        make status > build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "Build Information:" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "  Build Type: ${{ matrix.build_type }}" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "  Workflow: ${{ github.workflow }}" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "  Run ID: ${{ github.run_id }}" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "  Repository: ${{ github.repository }}" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "  Commit: ${{ github.sha }}" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "  Ref: ${{ github.ref }}" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "  Actor: ${{ github.actor }}" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+        echo "  Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
         
         if [ -f "build/${{ env.APPIMAGE_NAME }}" ]; then
-          echo "  File Size: $(du -h build/${{ env.APPIMAGE_NAME }} | cut -f1)" >> build-summary-${{ matrix.arch_name }}.txt
-          echo "  File SHA256: $(sha256sum build/${{ env.APPIMAGE_NAME }} | cut -d' ' -f1)" >> build-summary-${{ matrix.arch_name }}.txt
+          echo "  File Size: $(du -h build/${{ env.APPIMAGE_NAME }} | cut -f1)" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
+          echo "  File SHA256: $(sha256sum build/${{ env.APPIMAGE_NAME }} | cut -d' ' -f1)" >> build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
         fi
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
-      if: always()
+      if: always() && steps.should_build.outputs.should_build == 'true'
       with:
-        name: r-appimage-${{ matrix.arch_name }}
+        name: r-appimage-${{ matrix.arch_name }}-${{ matrix.build_type }}
         path: |
           build/${{ env.APPIMAGE_NAME }}
-          build-summary-${{ matrix.arch_name }}.txt
+          build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
         retention-days: 30
         if-no-files-found: warn
 
     - name: Upload AppImage to release (on release)
-      if: github.event_name == 'release' && github.event.action == 'published'
+      if: github.event_name == 'release' && github.event.action == 'published' && steps.should_build.outputs.should_build == 'true'
       uses: softprops/action-gh-release@v2
       with:
         files: |
           build/${{ env.APPIMAGE_NAME }}
-          build-summary-${{ matrix.arch_name }}.txt
+          build-summary-${{ matrix.arch_name }}-${{ matrix.build_type }}.txt
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -189,27 +272,48 @@ jobs:
         find artifacts -name "*.AppImage" -exec cp {} release-assets/ \;
         find artifacts -name "build-summary-*.txt" -exec cp {} release-assets/ \;
               
-        # Verify we have both architectures
-        echo "Checking for required AppImages:"
-        x86_64_found=false
-        aarch64_found=false
+        # Verify we have the expected AppImages based on build type
+        echo "Checking for AppImages (BUILD_TYPE: ${{ env.BUILD_TYPE }}):"
+        
+        # Initialize counters
+        x86_64_minimal_found=false
+        x86_64_packages_found=false
+        aarch64_minimal_found=false
+        aarch64_packages_found=false
         
         for appimage in release-assets/*.AppImage; do
-          if [[ "$appimage" == *"x86_64"* ]]; then
-            echo "[OK] Found x86_64 AppImage: $(basename "$appimage")"
-            x86_64_found=true
-          elif [[ "$appimage" == *"aarch64"* ]]; then
-            echo "[OK] Found aarch64 AppImage: $(basename "$appimage")"
-            aarch64_found=true
+          if [[ ! -f "$appimage" ]]; then continue; fi
+          
+          filename=$(basename "$appimage")
+          echo "Found AppImage: $filename"
+          
+          if [[ "$filename" == *"x86_64"* ]]; then
+            if [[ "$filename" == *"packages"* ]]; then
+              x86_64_packages_found=true
+            else
+              x86_64_minimal_found=true
+            fi
+          elif [[ "$filename" == *"aarch64"* ]]; then
+            if [[ "$filename" == *"packages"* ]]; then
+              aarch64_packages_found=true
+            else
+              aarch64_minimal_found=true
+            fi
           fi
         done
         
-        if [ "$x86_64_found" = false ]; then
-          echo "WARNING: x86_64 AppImage not found"
-        fi
-        
-        if [ "$aarch64_found" = false ]; then
-          echo "WARNING: aarch64 AppImage not found"
+        # Check expected builds based on BUILD_TYPE
+        if [[ "${{ env.BUILD_TYPE }}" == "minimal" ]]; then
+          [[ "$x86_64_minimal_found" == true ]] && echo "[OK] x86_64 minimal AppImage found" || echo "WARNING: x86_64 minimal AppImage not found"
+          [[ "$aarch64_minimal_found" == true ]] && echo "[OK] aarch64 minimal AppImage found" || echo "WARNING: aarch64 minimal AppImage not found"
+        elif [[ "${{ env.BUILD_TYPE }}" == "packages" ]]; then
+          [[ "$x86_64_packages_found" == true ]] && echo "[OK] x86_64 packages AppImage found" || echo "WARNING: x86_64 packages AppImage not found"
+          [[ "$aarch64_packages_found" == true ]] && echo "[OK] aarch64 packages AppImage found" || echo "WARNING: aarch64 packages AppImage not found"
+        elif [[ "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          [[ "$x86_64_minimal_found" == true ]] && echo "[OK] x86_64 minimal AppImage found" || echo "WARNING: x86_64 minimal AppImage not found"
+          [[ "$x86_64_packages_found" == true ]] && echo "[OK] x86_64 packages AppImage found" || echo "WARNING: x86_64 packages AppImage not found"
+          [[ "$aarch64_minimal_found" == true ]] && echo "[OK] aarch64 minimal AppImage found" || echo "WARNING: aarch64 minimal AppImage not found"
+          [[ "$aarch64_packages_found" == true ]] && echo "[OK] aarch64 packages AppImage found" || echo "WARNING: aarch64 packages AppImage not found"
         fi
         
         # Create combined build summary
@@ -217,6 +321,7 @@ jobs:
         echo "========================" >> release-assets/README.txt
         echo "" >> release-assets/README.txt
         echo "R Version: ${{ env.R_VERSION }}" >> release-assets/README.txt
+        echo "Build Type: ${{ env.BUILD_TYPE }}" >> release-assets/README.txt
         echo "Build Date: ${{ env.BUILD_DATE }}" >> release-assets/README.txt
         echo "Repository: ${{ github.repository }}" >> release-assets/README.txt
         echo "Commit: ${{ github.sha }}" >> release-assets/README.txt
@@ -238,75 +343,198 @@ jobs:
         echo "Total AppImages: $appimage_count" >> release-assets/README.txt
         echo "" >> release-assets/README.txt
         echo "Usage:" >> release-assets/README.txt
-        echo "  Download the appropriate AppImage for your architecture" >> release-assets/README.txt
+        echo "  Download the appropriate AppImage for your architecture and needs" >> release-assets/README.txt
         echo "  Make it executable: chmod +x R-*.AppImage" >> release-assets/README.txt
         echo "  Run: ./R-*.AppImage" >> release-assets/README.txt
         echo "" >> release-assets/README.txt
-        echo "This is an immutable R environment with pre-installed packages." >> release-assets/README.txt
+        
+        if [[ "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          echo "Build Types:" >> release-assets/README.txt
+          echo "  - Minimal: Base R with essential packages only (~150MB)" >> release-assets/README.txt
+          echo "  - Packages: Includes pre-installed data science packages (~300MB+)" >> release-assets/README.txt
+          echo "" >> release-assets/README.txt
+        fi
+        
+        echo "This is an immutable R environment." >> release-assets/README.txt
         echo "Package installation is disabled to maintain consistency." >> release-assets/README.txt
+        
+        if [[ "${{ env.BUILD_TYPE }}" == "packages" || "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          echo "Use 'show.available.packages()' in R to see pre-installed packages." >> release-assets/README.txt
+        fi
 
         echo "Final release assets:"
         ls -la release-assets/
+
+    - name: Create release body
+      id: release_body
+      run: |
+        # Create base release body
+        cat > release_body.md << 'EOF'
+        # R AppImage ${{ env.R_VERSION }}
+        
+        AppImage version of R ${{ env.R_VERSION }} for Linux with support for multiple architectures.
+        
+        **Build Type:** ${{ env.BUILD_TYPE }}
+        
+        ## Quick Download
+        
+        EOF
+        
+        # Add conditional download sections based on BUILD_TYPE
+        if [[ "${{ env.BUILD_TYPE }}" == "minimal" ]]; then
+          cat >> release_body.md << 'EOF'
+        ### Minimal Build (Base R Only)
+        
+        **x86_64 (Intel/AMD 64-bit):**
+        ```bash
+        wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-x86_64.AppImage
+        chmod +x R-${{ env.R_VERSION }}-x86_64.AppImage && ./R-${{ env.R_VERSION }}-x86_64.AppImage
+        ```
+        
+        **aarch64 (ARM 64-bit):**
+        ```bash
+        wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-aarch64.AppImage
+        chmod +x R-${{ env.R_VERSION }}-aarch64.AppImage && ./R-${{ env.R_VERSION }}-aarch64.AppImage
+        ```
+        
+        EOF
+        elif [[ "${{ env.BUILD_TYPE }}" == "packages" ]]; then
+          cat >> release_body.md << 'EOF'
+        ### Packages Build (With Pre-installed Packages)
+        
+        **x86_64 (Intel/AMD 64-bit):**
+        ```bash
+        wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-x86_64-packages.AppImage
+        chmod +x R-${{ env.R_VERSION }}-x86_64-packages.AppImage && ./R-${{ env.R_VERSION }}-x86_64-packages.AppImage
+        ```
+        
+        **aarch64 (ARM 64-bit):**
+        ```bash
+        wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-aarch64-packages.AppImage
+        chmod +x R-${{ env.R_VERSION }}-aarch64-packages.AppImage && ./R-${{ env.R_VERSION }}-aarch64-packages.AppImage
+        ```
+        
+        EOF
+        elif [[ "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          cat >> release_body.md << 'EOF'
+        ### Choose Your Build Type
+        
+        **Minimal Build (~75MB) - Base R Only:**
+        
+        x86_64: `wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-x86_64.AppImage`
+        
+        aarch64: `wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-aarch64.AppImage`
+        
+        **Packages Build (~200MB+) - With Pre-installed Packages:**
+        
+        x86_64: `wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-x86_64-packages.AppImage`
+        
+        aarch64: `wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-aarch64-packages.AppImage`
+        
+        After download, make executable and run:
+        ```bash
+        chmod +x R-*.AppImage && ./R-*.AppImage
+        ```
+        
+        EOF
+        fi
+        
+        # Add features section
+        cat >> release_body.md << 'EOF'
+        ## Features
+        
+        - R ${{ env.R_VERSION }} built from source
+        - Immutable environment (package installation disabled)
+        - Portable AppImage format
+        - Multi-architecture support (x86_64, aarch64)
+        EOF
+        
+        # Add build-type specific features
+        if [[ "${{ env.BUILD_TYPE }}" == "minimal" ]]; then
+          echo "- Base R packages only (~75MB)" >> release_body.md
+        elif [[ "${{ env.BUILD_TYPE }}" == "packages" ]]; then
+          echo "- Pre-installed data science packages (~200MB+)" >> release_body.md
+        elif [[ "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          echo "- Choice between minimal (~75MB) and packages (~200MB+) builds" >> release_body.md
+        fi
+        
+        # Add build types section for 'both' builds
+        if [[ "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          cat >> release_body.md << 'EOF'
+        
+        ## Build Types
+
+        **Minimal Build (~75MB):**
+
+        - Base R packages only
+        - Lightweight and fast
+        - Ideal for basic R scripting
+
+        **Packages Build (~200MB+):**
+
+        - Includes pre-installed data science packages
+        - Ready for data analysis and visualization
+        - Pre-installed packages: jsonlite, httr, ggplot2, dplyr, tidyr, readr, stringr, lubridate, shiny, rmarkdown, knitr, devtools, data.table, plotly, DT
+        EOF
+        fi
+        
+        # Add available packages section for packages and both builds
+        if [[ "${{ env.BUILD_TYPE }}" == "packages" || "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          cat >> release_body.md << 'EOF'
+        
+        ## Available Packages
+        
+        The packages build includes pre-installed packages: jsonlite, httr, ggplot2, dplyr, tidyr, readr, stringr, lubridate, shiny, rmarkdown, knitr, devtools, data.table, plotly, DT
+        
+        Use `show.available.packages()` in R to see all included packages.
+        EOF
+        fi
+        
+        # Add usage section
+        cat >> release_body.md << 'EOF'
+        
+        ## Usage
+
+        1. Download the appropriate AppImage for your architecture
+        EOF
+        
+        if [[ "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          echo "   and needs" >> release_body.md
+        fi
+        
+        cat >> release_body.md << 'EOF'
+        2. Make it executable: `chmod +x R-*.AppImage`
+        3. Run: `./R-*.AppImage`
+        
+        ## Notes
+
+        - This is an immutable environment - package installation is disabled
+        EOF
+        
+        # Add build-type specific notes
+        if [[ "${{ env.BUILD_TYPE }}" == "minimal" ]]; then
+          echo "- Minimal build: Base R packages only for lightweight usage" >> release_body.md
+        elif [[ "${{ env.BUILD_TYPE }}" == "packages" ]]; then
+          echo "- Packages build: Includes common data science packages" >> release_body.md
+        elif [[ "${{ env.BUILD_TYPE }}" == "both" ]]; then
+          echo "- Choose minimal for lightweight usage or packages for data science work" >> release_body.md
+        fi
+        
+        cat >> release_body.md << 'EOF'
+        - Built on: ${{ env.BUILD_DATE }}
+        - Commit: ${{ github.sha }}
+        - See README.txt in the release assets for detailed information
+        EOF
+        
+        # Set output for next step
+        echo "RELEASE_BODY_FILE=release_body.md" >> $GITHUB_OUTPUT
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ env.TAG_NAME }}
         name: "R AppImage ${{ env.R_VERSION }} (${{ env.TAG_NAME }})"
-        body: |
-          # R AppImage ${{ env.R_VERSION }}
-          
-          AppImage version of R with pre-installed packages for multiple architectures on Linux.
-                    
-          ## Quick Download
-          
-          **x86_64 (Intel/AMD 64-bit):**
-
-          ```bash
-          # Download with wget
-          wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-x86_64.AppImage
-          
-          # Download with curl
-          curl -L -O ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-x86_64.AppImage
-
-          chmod +x R-${{ env.R_VERSION }}-x86_64.AppImage && ./R-${{ env.R_VERSION }}-x86_64.AppImage
-          ```
-          
-          **aarch64 (ARM 64-bit):**
-
-          ```bash
-          # Download with wget
-          wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-aarch64.AppImage
-          
-          # Download with curl
-          curl -L -O ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-aarch64.AppImage
-          
-          chmod +x R-${{ env.R_VERSION }}-aarch64.AppImage && ./R-${{ env.R_VERSION }}-aarch64.AppImage
-          ```
-
-          ## Features
-          - R ${{ env.R_VERSION }} built from source
-          - Pre-installed packages for data science and statistics
-          - Immutable environment (package installation disabled)
-          - Portable AppImage format
-          - Multi-architecture support (x86_64, aarch64)
-          
-          ## Usage
-
-          1. Download the appropriate AppImage for your architecture (see commands above)
-          2. Make it executable: `chmod +x R-*.AppImage`
-          3. Run: `./R-*.AppImage`
-          
-          ## Available Packages
-
-          The AppImage includes pre-installed packages: jsonlite, httr, ggplot2, dplyr, tidyr, readr, stringr, lubridate, shiny, rmarkdown, knitr, devtools, data.table, plotly, DT
-          
-          ## Notes
-
-          - This is an immutable environment - package installation is disabled
-          - Use `show.available.packages()` to see all included packages
-          - Built on: ${{ env.BUILD_DATE }}
-          - Commit: ${{ github.sha }}
+        body_path: ${{ steps.release_body.outputs.RELEASE_BODY_FILE }}
         files: release-assets/*
         draft: false
         prerelease: false
