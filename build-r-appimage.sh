@@ -640,6 +640,107 @@ create_icon() {
     cd - > /dev/null
 }
 
+# Create AppData metadata file
+create_appdata_file() {
+    log_info "Creating AppData metadata file..."
+    
+    # Create metainfo directory
+    local metainfo_dir="${APPDIR}/usr/share/metainfo"
+    mkdir -p "${metainfo_dir}"
+    
+    # Determine build type description
+    local build_description=""
+    local package_info=""
+    if [ "$SKIP_PACKAGES" = false ]; then
+        build_description="with pre-installed packages"
+        package_info="<li>Pre-installed packages: $(printf '%s, ' "${PREINSTALLED_PACKAGES[@]}" | sed 's/, $//')</li>"
+    else
+        build_description="minimal base installation"
+        package_info="<li>Base R packages only</li>"
+    fi
+    
+    # Create AppData XML file
+    cat > "${metainfo_dir}/Rappimage.appdata.xml" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+    <id>Rappimage</id>
+    <metadata_license>MIT</metadata_license>
+    <project_license>GPL-2.0-or-later</project_license>
+    <name>AppImage for R Statistical Computing</name>
+    <summary>R language for statistical computing and graphics in a Portable AppImage</summary>
+    <description>
+        <p>
+            R is a free software environment for statistical computing and graphics. 
+            This AppImage provides a portable, self-contained R installation that runs 
+            on any Linux distribution without requiring system-wide installation.
+        </p>
+        <p>
+            This immutable AppImage environment includes R ${R_VERSION} for ${ARCH_NAME} 
+            architecture ${build_description}. The filesystem is read-only, ensuring 
+            consistency across different systems and preventing package installation conflicts.
+        </p>
+        <ul>
+            <li>Complete R statistical computing environment</li>
+            <li>Self-contained - no system dependencies</li>
+            <li>Portable across Linux distributions</li>
+            <li>Immutable filesystem for consistency</li>
+            ${package_info}
+        </ul>
+    </description>
+    <launchable type="desktop-id">Rappimage.desktop</launchable>
+    <icon type="stock">R.png</icon>
+    <url type="homepage">https://www.r-project.org</url>
+    <url type="help">https://cran.r-project.org/manuals.html</url>
+    <url type="faq">https://cran.r-project.org/faqs.html</url>
+    <developer>R AppImage was made by HJJB, LLC and the R Language was by R Core Team</developer>
+    <categories>
+        <category>Science</category>
+        <category>Math</category>
+        <category>Education</category>
+        <category>Development</category>
+    </categories>
+    <keywords>
+        <keyword>statistics</keyword>
+        <keyword>data analysis</keyword>
+        <keyword>graphics</keyword>
+        <keyword>programming</keyword>
+        <keyword>mathematics</keyword>
+        <keyword>science</keyword>
+        <keyword>research</keyword>
+    </keywords>
+    <provides>
+        <binary>R</binary>
+        <binary>Rscript</binary>
+    </provides>
+    <releases>
+        <release version="${R_VERSION}" date="$(date +%Y-%m-%d)">
+            <description>
+                <p>R ${R_VERSION} packaged as portable AppImage</p>
+                <ul>
+                    <li>Immutable filesystem environment</li>
+                    <li>Self-contained dependencies</li>
+                    <li>Cross-distribution compatibility</li>
+                    <li>Architecture: ${ARCH_NAME}</li>
+                </ul>
+            </description>
+        </release>
+    </releases>
+    <content_rating type="oars-1.1" />
+</component>
+EOF
+
+    # Validate the AppData file if appstream-util is available
+    if command -v appstream-util >/dev/null 2>&1; then
+        if appstream-util validate-relax "${metainfo_dir}/R.appdata.xml"; then
+            log_success "AppData file created and validated"
+        else
+            log_warning "AppData file created but validation failed"
+        fi
+    else
+        log_success "AppData file created (install appstream-util for validation)"
+    fi
+}
+
 # Create AppRun script
 create_apprun() {
     log_info "Creating AppRun script..."
@@ -815,6 +916,7 @@ main() {
     create_r_profile
     copy_libraries
     create_desktop_file
+    create_appdata_file
     create_icon
     create_apprun
     create_diricon
