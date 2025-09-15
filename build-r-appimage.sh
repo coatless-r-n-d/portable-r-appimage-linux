@@ -195,8 +195,9 @@ build_r() {
     
     log_info "Configuring R build for ${ARCH_NAME}..."
     
-    # Architecture-specific configuration
-    local config_args="--prefix=${APPDIR}/usr \
+    # IMPORTANT: Use /usr as prefix, not ${APPDIR}/usr to avoid hardcoded paths
+    # We'll use DESTDIR during make install to redirect to AppDir
+    local config_args="--prefix=/usr \
         --enable-R-shlib \
         --enable-memory-profiling \
         --with-blas \
@@ -239,8 +240,9 @@ build_r() {
     
     make -j${nproc_count}
     
-    log_info "Installing R to AppDir..."
-    make install
+    log_info "Installing R to AppDir using DESTDIR..."
+    # Use DESTDIR to redirect installation to AppDir while keeping relative paths
+    make install DESTDIR="${APPDIR}"
     
     cd - > /dev/null
     log_success "R built and installed to AppDir for ${ARCH_NAME}"
@@ -653,17 +655,16 @@ HERE="$(dirname "$(readlink -f "$0")")"
 unset R_HOME R_LIBS_USER R_SHARE_DIR R_INCLUDE_DIR R_DOC_DIR R_LIBS R_ENVIRON R_PROFILE
 
 # Set up environment for AppImage R
-export PATH="${HERE}/usr/bin:${PATH}"
-export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-export R_HOME="${HERE}/usr/lib/R"
+export PATH="${APPDIR}/usr/bin:${PATH}"
+export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
 
 # Use only the built-in library (no user library for immutable environment)
-export R_LIBS="${HERE}/usr/lib/R/library"
+export R_LIBS="${APPDIR}/usr/lib/R/library"
 
 # Ensure R can find its resources
-export R_SHARE_DIR="${HERE}/usr/share/R/share"
-export R_INCLUDE_DIR="${HERE}/usr/share/R/include"
-export R_DOC_DIR="${HERE}/usr/share/R/doc"
+export R_SHARE_DIR="${APPDIR}/usr/share/R/share"
+export R_INCLUDE_DIR="${APPDIR}/usr/share/R/include"
+export R_DOC_DIR="${APPDIR}/usr/share/R/doc"
 
 # Launch R with any arguments passed
 exec "${HERE}/usr/bin/R" "$@"
