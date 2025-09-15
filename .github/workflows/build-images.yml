@@ -27,7 +27,7 @@ on:
 
 env:
   R_VERSION: ${{ github.event.inputs.r_version || '4.5.1' }}
-  MAKEFLAGS: "-j$(nproc)"
+  MAKEFLAGS: "-j 3"  # Limit to 3 parallel jobs to reduce memory usage
 
 jobs:
   build:
