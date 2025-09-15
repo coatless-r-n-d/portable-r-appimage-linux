@@ -1,7 +1,6 @@
 # Makefile for R AppImage Builder
 # Multi-Architecture Support (x86_64 and aarch64)
-# Immutable Environment with Pre-installed Packages
-# R 4.5.1 with locked-down package management
+# R 4.5.1 with immutable filesystem
 
 R_VERSION ?= 4.5.1
 BUILD_DIR = build
@@ -18,9 +17,10 @@ else
 endif
 
 APPIMAGE_NAME = R-$(R_VERSION)-$(ARCH_NAME).AppImage
+APPIMAGE_PACKAGES_NAME = R-$(R_VERSION)-$(ARCH_NAME)-packages.AppImage
 SCRIPT_NAME = build-r-appimage.sh
 
-# Pre-installed packages (edit in build script for custom packages)
+# Pre-installed packages (only used with appimage-packages target)
 PREINSTALLED_PACKAGES = jsonlite httr ggplot2 dplyr tidyr readr stringr lubridate shiny rmarkdown knitr devtools data.table plotly DT
 
 # Colors for output
@@ -37,35 +37,50 @@ all: appimage
 help:
 	@echo "$(BLUE)R AppImage Builder ($(ARCH_NAME)) - Immutable Environment$(NC)"
 	@echo ""
-	@echo "$(GREEN)🔒 Immutable R $(R_VERSION) with Pre-installed Packages$(NC)"
+	@echo "$(GREEN)Build R $(R_VERSION) AppImages with configurable environments$(NC)"
 	@echo ""
 	@echo "$(GREEN)Available targets:$(NC)"
-	@echo "  appimage         - Build immutable R AppImage with pre-installed packages"
-	@echo "  deps             - Install dependencies (auto-detect OS)"
-	@echo "  deps-ubuntu      - Install Ubuntu/Debian dependencies"
-	@echo "  deps-fedora      - Install Fedora dependencies"
-	@echo "  deps-centos      - Install CentOS/RHEL dependencies"
-	@echo "  test             - Test the built AppImage"
-	@echo "  test-immutable   - Test immutable features (package installation blocking)"
-	@echo "  install          - Install to ~/.local/bin"
-	@echo "  clean            - Clean build artifacts"
-	@echo "  clean-all        - Clean everything including downloads"
-	@echo "  status           - Show build status"
-	@echo "  show-packages    - Show pre-installed packages"
-	@echo "  arch-info        - Show architecture info"
-	@echo "  os-info          - Show detected OS info"
-	@echo "  validate         - Validate build script syntax"
-	@echo "  quickstart       - Show quick start guide"
+	@echo "  appimage              - Build minimal R AppImage (base packages only)"
+	@echo "  appimage-packages     - Build with pre-installed packages"
+	@echo "  deps                  - Install dependencies (auto-detect OS)"
+	@echo "  deps-ubuntu           - Install Ubuntu/Debian dependencies"
+	@echo "  deps-fedora           - Install Fedora dependencies"
+	@echo "  deps-centos           - Install CentOS/RHEL dependencies"
+	@echo "  test                  - Test the built AppImage"
+	@echo "  test-minimal          - Test minimal AppImage specifically"
+	@echo "  test-packages         - Test packages AppImage specifically"
+	@echo "  test-immutable        - Test immutable features (both builds)"
+	@echo "  install               - Install minimal AppImage to ~/.local/bin"
+	@echo "  install-packages      - Install packages AppImage to ~/.local/bin"
+	@echo "  clean                 - Clean build artifacts"
+	@echo "  clean-all             - Clean everything including downloads"
+	@echo "  status                - Show build status"
+	@echo "  show-packages         - Show pre-installed packages list"
+	@echo "  arch-info             - Show architecture info"
+	@echo "  os-info               - Show detected OS info"
+	@echo "  validate              - Validate build script syntax"
+	@echo "  quickstart            - Show quick start guide"
 	@echo ""
-	@echo "$(YELLOW)⚠️  Note: Package installation is disabled after building$(NC)"
-	@echo "$(YELLOW)   Customize PREINSTALLED_PACKAGES in build script$(NC)"
+	@echo "$(GREEN)Build Types:$(NC)"
+	@echo "  $(BLUE)Minimal$(NC)    - Base R only, faster build, immutable filesystem"
+	@echo "  $(BLUE)Packages$(NC)   - Pre-configured with packages, slower build, immutable filesystem"
+	@echo ""
+	@echo "$(YELLOW)IMPORTANT: Both builds have read-only filesystems (AppImage limitation)$(NC)"
+	@echo "$(YELLOW)           NO additional packages can be installed after creation$(NC)"
 
 .PHONY: appimage
 appimage: $(SCRIPT_NAME)
-	@echo "$(BLUE)Building immutable R $(R_VERSION) AppImage for $(ARCH_NAME)...$(NC)"
-	@echo "$(YELLOW)This will take longer due to package pre-installation$(NC)"
+	@echo "$(BLUE)Building minimal R $(R_VERSION) AppImage for $(ARCH_NAME)...$(NC)"
+	@echo "$(GREEN)Base R packages only - immutable filesystem$(NC)"
 	@chmod +x $(SCRIPT_NAME)
-	@./$(SCRIPT_NAME)
+	@./$(SCRIPT_NAME) --minimal
+
+.PHONY: appimage-packages
+appimage-packages: $(SCRIPT_NAME)
+	@echo "$(BLUE)Building R $(R_VERSION) AppImage with packages for $(ARCH_NAME)...$(NC)"
+	@echo "$(YELLOW)This will take longer due to package pre-installation - immutable filesystem$(NC)"
+	@chmod +x $(SCRIPT_NAME)
+	@./$(SCRIPT_NAME) --with-packages
 
 # Auto-detect OS and install appropriate dependencies
 .PHONY: deps
@@ -216,45 +231,105 @@ deps-centos:
 
 .PHONY: test
 test:
+	@echo "$(BLUE)Testing available AppImages...$(NC)"
+	@tested=false; \
+	if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
+		echo "$(YELLOW)Testing minimal AppImage...$(NC)"; \
+		$(MAKE) test-minimal; \
+		tested=true; \
+	fi; \
+	if [ -f "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ]; then \
+		echo "$(YELLOW)Testing packages AppImage...$(NC)"; \
+		$(MAKE) test-packages; \
+		tested=true; \
+	fi; \
+	if [ "$$tested" = false ]; then \
+		echo "$(YELLOW)No AppImages found. Build one first:$(NC)"; \
+		echo "  make appimage         (minimal build)"; \
+		echo "  make appimage-packages (with packages)"; \
+		exit 1; \
+	fi
+
+.PHONY: test-minimal
+test-minimal:
 	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
-		echo "$(BLUE)Testing AppImage...$(NC)"; \
+		echo "$(BLUE)Testing minimal AppImage...$(NC)"; \
 		chmod +x "$(BUILD_DIR)/$(APPIMAGE_NAME)"; \
 		"$(BUILD_DIR)/$(APPIMAGE_NAME)" --version && \
-		echo "$(GREEN)✓ AppImage test passed$(NC)" || \
-		echo "$(YELLOW)⚠ AppImage exists but test failed$(NC)"; \
+		echo "$(GREEN)[PASS] Minimal AppImage test passed$(NC)" || \
+		echo "$(YELLOW)[WARN] Minimal AppImage exists but test failed$(NC)"; \
 	else \
-		echo "$(YELLOW)AppImage not found: $(BUILD_DIR)/$(APPIMAGE_NAME)$(NC)"; \
+		echo "$(YELLOW)Minimal AppImage not found: $(BUILD_DIR)/$(APPIMAGE_NAME)$(NC)"; \
 		echo "Run 'make appimage' first"; \
+		exit 1; \
+	fi
+
+.PHONY: test-packages
+test-packages:
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ]; then \
+		echo "$(BLUE)Testing packages AppImage...$(NC)"; \
+		chmod +x "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)"; \
+		"$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" --version && \
+		echo "$(GREEN)[PASS] Packages AppImage test passed$(NC)" || \
+		echo "$(YELLOW)[WARN] Packages AppImage exists but test failed$(NC)"; \
+	else \
+		echo "$(YELLOW)Packages AppImage not found: $(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)$(NC)"; \
+		echo "Run 'make appimage-packages' first"; \
 		exit 1; \
 	fi
 
 .PHONY: test-immutable
 test-immutable:
-	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
-		echo "$(BLUE)Testing immutable features...$(NC)"; \
-		echo "$(YELLOW)Testing that install.packages() is blocked:$(NC)"; \
+	@echo "$(BLUE)Testing immutable features (both builds are immutable)...$(NC)"
+	@tested=false; \
+	if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
+		echo "$(YELLOW)Testing minimal AppImage immutable features:$(NC)"; \
 		"$(BUILD_DIR)/$(APPIMAGE_NAME)" -e "install.packages('nonexistent')" || true; \
 		echo ""; \
+		tested=true; \
+	fi; \
+	if [ -f "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ]; then \
+		echo "$(YELLOW)Testing packages AppImage immutable features:$(NC)"; \
+		"$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" -e "install.packages('nonexistent')" || true; \
+		echo ""; \
 		echo "$(YELLOW)Testing show.available.packages():$(NC)"; \
-		"$(BUILD_DIR)/$(APPIMAGE_NAME)" -e "show.available.packages()"; \
-		echo "$(GREEN)✓ Immutable features test completed$(NC)"; \
+		"$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" -e "show.available.packages()"; \
+		tested=true; \
+	fi; \
+	if [ "$$tested" = true ]; then \
+		echo "$(GREEN)[PASS] Immutable features test completed$(NC)"; \
 	else \
-		echo "$(YELLOW)AppImage not found. Run 'make appimage' first$(NC)"; \
+		echo "$(YELLOW)No AppImages found. Build one first$(NC)"; \
 		exit 1; \
 	fi
 
 .PHONY: install
 install:
 	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
-		echo "$(BLUE)Installing to ~/.local/bin/...$(NC)"; \
+		echo "$(BLUE)Installing minimal AppImage to ~/.local/bin/...$(NC)"; \
 		mkdir -p ~/.local/bin; \
 		cp "$(BUILD_DIR)/$(APPIMAGE_NAME)" ~/.local/bin/R.AppImage; \
 		chmod +x ~/.local/bin/R.AppImage; \
-		echo "$(GREEN)✓ Installed: ~/.local/bin/R.AppImage$(NC)"; \
+		echo "$(GREEN)[OK] Installed: ~/.local/bin/R.AppImage$(NC)"; \
 		echo "$(YELLOW)Make sure ~/.local/bin is in your PATH$(NC)"; \
 		echo "$(BLUE)Add to ~/.bashrc: export PATH=\"\$$HOME/.local/bin:\$$PATH\"$(NC)"; \
 	else \
-		echo "$(YELLOW)AppImage not found. Run 'make appimage' first$(NC)"; \
+		echo "$(YELLOW)Minimal AppImage not found. Run 'make appimage' first$(NC)"; \
+		exit 1; \
+	fi
+
+.PHONY: install-packages
+install-packages:
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ]; then \
+		echo "$(BLUE)Installing packages AppImage to ~/.local/bin/...$(NC)"; \
+		mkdir -p ~/.local/bin; \
+		cp "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ~/.local/bin/R-packages.AppImage; \
+		chmod +x ~/.local/bin/R-packages.AppImage; \
+		echo "$(GREEN)[OK] Installed: ~/.local/bin/R-packages.AppImage$(NC)"; \
+		echo "$(YELLOW)Make sure ~/.local/bin is in your PATH$(NC)"; \
+		echo "$(BLUE)Add to ~/.bashrc: export PATH=\"\$$HOME/.local/bin:\$$PATH\"$(NC)"; \
+	else \
+		echo "$(YELLOW)Packages AppImage not found. Run 'make appimage-packages' first$(NC)"; \
 		exit 1; \
 	fi
 
@@ -262,16 +337,30 @@ install:
 desktop-integration:
 	@echo "$(BLUE)Creating desktop integration...$(NC)"
 	@mkdir -p ~/.local/share/applications
-	@echo '[Desktop Entry]' > ~/.local/share/applications/R-AppImage.desktop
-	@echo 'Name=R Statistical Computing (Immutable)' >> ~/.local/share/applications/R-AppImage.desktop
-	@echo 'Comment=R Statistical Computing Environment - Pre-configured' >> ~/.local/share/applications/R-AppImage.desktop
-	@echo 'Exec=R.AppImage' >> ~/.local/share/applications/R-AppImage.desktop
-	@echo 'Icon=R' >> ~/.local/share/applications/R-AppImage.desktop
-	@echo 'Type=Application' >> ~/.local/share/applications/R-AppImage.desktop
-	@echo 'Categories=Science;Math;' >> ~/.local/share/applications/R-AppImage.desktop
-	@echo 'Terminal=true' >> ~/.local/share/applications/R-AppImage.desktop
-	@echo 'StartupNotify=true' >> ~/.local/share/applications/R-AppImage.desktop
-	@echo "$(GREEN)✓ Desktop integration created$(NC)"
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
+		echo '[Desktop Entry]' > ~/.local/share/applications/R-AppImage.desktop; \
+		echo 'Name=R Statistical Computing' >> ~/.local/share/applications/R-AppImage.desktop; \
+		echo 'Comment=R Statistical Computing Environment' >> ~/.local/share/applications/R-AppImage.desktop; \
+		echo 'Exec=R.AppImage' >> ~/.local/share/applications/R-AppImage.desktop; \
+		echo 'Icon=R' >> ~/.local/share/applications/R-AppImage.desktop; \
+		echo 'Type=Application' >> ~/.local/share/applications/R-AppImage.desktop; \
+		echo 'Categories=Science;Math;' >> ~/.local/share/applications/R-AppImage.desktop; \
+		echo 'Terminal=true' >> ~/.local/share/applications/R-AppImage.desktop; \
+		echo 'StartupNotify=true' >> ~/.local/share/applications/R-AppImage.desktop; \
+		echo "$(GREEN)[OK] Desktop integration created for minimal AppImage$(NC)"; \
+	fi
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ]; then \
+		echo '[Desktop Entry]' > ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo 'Name=R Statistical Computing (Pre-configured)' >> ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo 'Comment=R Statistical Computing Environment - Pre-configured' >> ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo 'Exec=R-packages.AppImage' >> ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo 'Icon=R' >> ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo 'Type=Application' >> ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo 'Categories=Science;Math;' >> ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo 'Terminal=true' >> ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo 'StartupNotify=true' >> ~/.local/share/applications/R-Packages-AppImage.desktop; \
+		echo "$(GREEN)[OK] Desktop integration created for packages AppImage$(NC)"; \
+	fi
 
 # Clean build artifacts but keep downloads
 .PHONY: clean
@@ -280,7 +369,7 @@ clean:
 	@if [ -d "$(BUILD_DIR)" ]; then \
 		rm -rf $(BUILD_DIR)/R.AppDir; \
 		rm -f $(BUILD_DIR)/R-$(R_VERSION)-*.AppImage; \
-		echo "$(GREEN)✓ Build artifacts cleaned$(NC)"; \
+		echo "$(GREEN)[OK] Build artifacts cleaned$(NC)"; \
 	else \
 		echo "$(YELLOW)No build directory found$(NC)"; \
 	fi
@@ -291,7 +380,7 @@ clean-all:
 	@echo "$(BLUE)Cleaning everything...$(NC)"
 	@if [ -d "$(BUILD_DIR)" ]; then \
 		rm -rf $(BUILD_DIR); \
-		echo "$(GREEN)✓ Everything cleaned (including downloads)$(NC)"; \
+		echo "$(GREEN)[OK] Everything cleaned (including downloads)$(NC)"; \
 	else \
 		echo "$(YELLOW)No build directory found$(NC)"; \
 	fi
@@ -306,7 +395,7 @@ clean-downloads:
 		rm -f $(BUILD_DIR)/appimagetool; \
 		rm -f $(BUILD_DIR)/Rlogo.svg; \
 		rm -rf $(BUILD_DIR)/R.AppDir; \
-		echo "$(GREEN)✓ Downloads cleaned$(NC)"; \
+		echo "$(GREEN)[OK] Downloads cleaned$(NC)"; \
 	else \
 		echo "$(YELLOW)No build directory found$(NC)"; \
 	fi
@@ -316,53 +405,69 @@ status:
 	@echo "$(BLUE)Build Status:$(NC)"
 	@echo "Architecture: $(ARCH_NAME)"
 	@echo "R Version: $(R_VERSION)"
-	@echo "Build Type: Immutable (pre-installed packages)"
 	@echo "Build Directory: $(BUILD_DIR)"
-	@echo "Expected AppImage: $(BUILD_DIR)/$(APPIMAGE_NAME)"
 	@echo ""
+	@echo "$(GREEN)Available builds:$(NC)"
 	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
-		echo "$(GREEN)✓ AppImage exists:$(NC)"; \
-		ls -lh "$(BUILD_DIR)/$(APPIMAGE_NAME)"; \
-		file "$(BUILD_DIR)/$(APPIMAGE_NAME)"; \
+		echo "$(GREEN)[YES] Minimal AppImage:$(NC)"; \
+		ls -lh "$(BUILD_DIR)/$(APPIMAGE_NAME)" | awk '{print "  Size: " $$5 ", Modified: " $$6 " " $$7 " " $$8}'; \
+		file "$(BUILD_DIR)/$(APPIMAGE_NAME)" | sed 's/^/  Type: /'; \
 	else \
-		echo "$(YELLOW)✗ AppImage not built$(NC)"; \
+		echo "$(YELLOW)[NO]  Minimal AppImage not built$(NC)"; \
+		echo "  Run: make appimage"; \
+	fi
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ]; then \
+		echo "$(GREEN)[YES] Packages AppImage:$(NC)"; \
+		ls -lh "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" | awk '{print "  Size: " $$5 ", Modified: " $$6 " " $$7 " " $$8}'; \
+		file "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" | sed 's/^/  Type: /'; \
+	else \
+		echo "$(YELLOW)[NO]  Packages AppImage not built$(NC)"; \
+		echo "  Run: make appimage-packages"; \
 	fi
 	@echo ""
+	@echo "$(BLUE)Build dependencies:$(NC)"
 	@if [ -f "$(BUILD_DIR)/appimagetool" ]; then \
-		echo "$(GREEN)✓ appimagetool downloaded$(NC)"; \
+		echo "$(GREEN)[YES] appimagetool downloaded$(NC)"; \
 	else \
-		echo "$(YELLOW)✗ appimagetool not downloaded$(NC)"; \
+		echo "$(YELLOW)[NO]  appimagetool not downloaded$(NC)"; \
 	fi
 	@if [ -f "$(BUILD_DIR)/R-$(R_VERSION).tar.gz" ]; then \
-		echo "$(GREEN)✓ R source downloaded$(NC)"; \
+		echo "$(GREEN)[YES] R source downloaded$(NC)"; \
 	else \
-		echo "$(YELLOW)✗ R source not downloaded$(NC)"; \
+		echo "$(YELLOW)[NO]  R source not downloaded$(NC)"; \
 	fi
 	@if [ -f "$(BUILD_DIR)/Rlogo.svg" ]; then \
-		echo "$(GREEN)✓ R logo downloaded$(NC)"; \
+		echo "$(GREEN)[YES] R logo downloaded$(NC)"; \
 	else \
-		echo "$(YELLOW)✗ R logo not downloaded$(NC)"; \
+		echo "$(YELLOW)[NO]  R logo not downloaded$(NC)"; \
 	fi
 	@if [ -d "$(BUILD_DIR)/R-$(R_VERSION)" ]; then \
-		echo "$(GREEN)✓ R source extracted$(NC)"; \
+		echo "$(GREEN)[YES] R source extracted$(NC)"; \
 	else \
-		echo "$(YELLOW)✗ R source not extracted$(NC)"; \
+		echo "$(YELLOW)[NO]  R source not extracted$(NC)"; \
 	fi
 
 .PHONY: show-packages
 show-packages:
-	@echo "$(BLUE)Pre-installed Packages:$(NC)"
-	@echo "$(YELLOW)The following packages will be included in the AppImage:$(NC)"
+	@echo "$(BLUE)Pre-installed Packages Configuration:$(NC)"
+	@echo "$(YELLOW)The following packages are included in 'make appimage-packages':$(NC)"
 	@echo ""
 	@for pkg in $(PREINSTALLED_PACKAGES); do \
-		echo "  📦 $$pkg"; \
+		echo "  - $$pkg"; \
 	done
+	@echo ""
+	@echo "$(BLUE)Build comparison:$(NC)"
+	@echo "  $(GREEN)make appimage$(NC)          - Base R only (faster, ~150MB)"
+	@echo "  $(GREEN)make appimage-packages$(NC) - With packages (slower, ~300MB+)"
 	@echo ""
 	@echo "$(BLUE)To customize packages:$(NC)"
 	@echo "  1. Edit PREINSTALLED_PACKAGES array in $(SCRIPT_NAME)"
-	@echo "  2. Run: make rebuild-all"
+	@echo "  2. Run: make clean && make appimage-packages"
 	@echo ""
-	@echo "$(YELLOW)Note: Package installation is disabled after building$(NC)"
+	@echo "$(YELLOW)Note: Both builds have immutable filesystems$(NC)"
+	@echo "  Both builds:     install.packages() is disabled (AppImage limitation)"
+	@echo "  Minimal build:   Base R packages only"
+	@echo "  Packages build:  Base R + pre-installed packages"
 
 .PHONY: arch-info
 arch-info:
@@ -383,91 +488,115 @@ os-info:
 	fi
 	@echo "Package Managers:"
 	@if command -v apt-get >/dev/null 2>&1; then \
-		echo "  ✓ apt-get (Ubuntu/Debian)"; \
+		echo "  [OK] apt-get (Ubuntu/Debian)"; \
 	fi
 	@if command -v dnf5 >/dev/null 2>&1; then \
-		echo "  ✓ dnf5 (Fedora)"; \
+		echo "  [OK] dnf5 (Fedora)"; \
 	elif command -v dnf >/dev/null 2>&1; then \
-		echo "  ✓ dnf (Fedora)"; \
+		echo "  [OK] dnf (Fedora)"; \
 	fi
 	@if command -v yum >/dev/null 2>&1; then \
-		echo "  ✓ yum (CentOS/RHEL)"; \
+		echo "  [OK] yum (CentOS/RHEL)"; \
 	fi
 	@echo "SVG Converters:"
 	@if command -v convert >/dev/null 2>&1; then \
-		echo "  ✓ ImageMagick"; \
+		echo "  [OK] ImageMagick"; \
 	fi
 	@if command -v rsvg-convert >/dev/null 2>&1; then \
-		echo "  ✓ rsvg-convert"; \
+		echo "  [OK] rsvg-convert"; \
 	fi
 	@if command -v inkscape >/dev/null 2>&1; then \
-		echo "  ✓ Inkscape"; \
+		echo "  [OK] Inkscape"; \
 	fi
 
 .PHONY: validate
 validate:
 	@echo "$(BLUE)Validating build script...$(NC)"
 	@if [ -f "$(SCRIPT_NAME)" ]; then \
-		echo "$(GREEN)✓ Build script exists$(NC)"; \
+		echo "$(GREEN)[OK] Build script exists$(NC)"; \
 		bash -n "$(SCRIPT_NAME)" && \
-		echo "$(GREEN)✓ Syntax is valid$(NC)" || \
-		echo "$(RED)✗ Syntax errors found$(NC)"; \
+		echo "$(GREEN)[OK] Syntax is valid$(NC)" || \
+		echo "$(RED)[ERROR] Syntax errors found$(NC)"; \
 	else \
-		echo "$(RED)✗ Build script not found: $(SCRIPT_NAME)$(NC)"; \
+		echo "$(RED)[ERROR] Build script not found: $(SCRIPT_NAME)$(NC)"; \
 	fi
 
 .PHONY: quickstart
 quickstart:
-	@echo "$(BLUE)R AppImage Builder - Immutable Environment$(NC)"
+	@echo "$(BLUE)R AppImage Builder - Quick Start Guide$(NC)"
 	@echo ""
-	@echo "$(GREEN)[IMMUTABLE] Quick Start for Pre-configured R Environment$(NC)"
+	@echo "$(GREEN)Fast Workflow (Base R)$(NC)"
 	@echo ""
 	@echo "$(GREEN)1. Install dependencies:$(NC)"
 	@echo "   make deps"
 	@echo ""
-	@echo "$(GREEN)2. Customize packages (optional):$(NC)"
-	@echo "   Edit PREINSTALLED_PACKAGES in $(SCRIPT_NAME)"
-	@echo ""
-	@echo "$(GREEN)3. Build AppImage (includes package installation):$(NC)"
+	@echo "$(GREEN)2. Build minimal AppImage (fast):$(NC)"
 	@echo "   make appimage"
 	@echo ""
-	@echo "$(GREEN)4. Test immutable features:$(NC)"
-	@echo "   make test-immutable"
+	@echo "$(GREEN)3. Test and use:$(NC)"
+	@echo "   make test"
+	@echo "   ./build/$(APPIMAGE_NAME)"
 	@echo ""
-	@echo "$(GREEN)5. Install to system:$(NC)"
+	@echo "$(GREEN)4. Install to system:$(NC)"
 	@echo "   make install"
 	@echo ""
-	@echo "$(BLUE)Usage examples:$(NC)"
-	@echo "   ./build/$(APPIMAGE_NAME)"
-	@echo "   ./build/$(APPIMAGE_NAME) -e \"show.available.packages()\""
-	@echo "   ./build/$(APPIMAGE_NAME) -e \"library(ggplot2)\""
+	@echo "$(BLUE)Extended Workflow (With Packages)$(NC)"
 	@echo ""
-	@echo "$(YELLOW)[WARNING] Important: Package installation is disabled$(NC)"
-	@echo "   - install.packages() will show available packages"
-	@echo "   - remove.packages() and update.packages() are disabled"
-	@echo "   - Customize packages by editing build script and rebuilding"
+	@echo "$(GREEN)1. Build with pre-installed packages (slower):$(NC)"
+	@echo "   make appimage-packages"
 	@echo ""
-	@echo "$(BLUE)Useful commands:$(NC)"
-	@echo "   make show-packages  - List pre-installed packages"
-	@echo "   make status         - Check build status"
-	@echo "   make help           - Show all targets"
+	@echo "$(GREEN)2. Test immutable features:$(NC)"
+	@echo "   make test-immutable"
+	@echo ""
+	@echo "$(GREEN)3. Install packages version:$(NC)"
+	@echo "   make install-packages"
+	@echo ""
+	@echo "$(YELLOW)Build Comparison:$(NC)"
+	@echo ""
+	@echo "$(GREEN)Minimal Build:$(NC)"
+	@echo "  _ Fast build (~15 minutes)"
+	@echo "  _ Base R packages only"
+	@echo "  _ install.packages() disabled (AppImage limitation)"
+	@echo "  _ Size: ~150MB"
+	@echo "  _ Use: Lightweight deployments, basic R scripting"
+	@echo ""
+	@echo "$(BLUE)Packages Build:$(NC)"
+	@echo "  - Slower build (~45 minutes)"
+	@echo "  - Pre-configured with useful packages"
+	@echo "  - install.packages() disabled (AppImage limitation)"
+	@echo "  - Size: ~300MB+"
+	@echo "  - Use: Production deployments, data analysis"
+	@echo ""
+	@echo "$(YELLOW)CRITICAL: Both builds have immutable filesystems (AppImage design)$(NC)"
+	@echo "$(YELLOW)          NO additional R packages can be installed after creation$(NC)"
+	@echo "$(YELLOW)          Choose packages at build time or use external R installation$(NC)"
 
-# Package the AppImage for distribution
+# Package the AppImages for distribution
 .PHONY: package
-package: appimage
+package:
 	@echo "$(BLUE)Creating release package for $(ARCH_NAME)...$(NC)"
 	@mkdir -p release
-	@cp "$(BUILD_DIR)/$(APPIMAGE_NAME)" release/
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
+		cp "$(BUILD_DIR)/$(APPIMAGE_NAME)" release/; \
+	fi
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ]; then \
+		cp "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" release/; \
+	fi
 	@if [ -f README.md ]; then cp README.md release/; fi
 	@if [ -f $(SCRIPT_NAME) ]; then cp $(SCRIPT_NAME) release/; fi
-	@echo "R AppImage $(R_VERSION) for $(ARCH_NAME) (Immutable)" > release/VERSION.txt
+	@echo "R AppImage $(R_VERSION) for $(ARCH_NAME)" > release/VERSION.txt
 	@echo "Built on: $$(date)" >> release/VERSION.txt
 	@echo "Architecture: $(ARCH_NAME)" >> release/VERSION.txt
-	@echo "Type: Immutable environment with pre-installed packages" >> release/VERSION.txt
-	@echo "Packages: $(PREINSTALLED_PACKAGES)" >> release/VERSION.txt
-	@echo "Package installation: Disabled" >> release/VERSION.txt
-	@tar -czf release/R-$(R_VERSION)-$(ARCH_NAME)-Immutable-AppImage-release.tar.gz -C release .
-	@echo "$(GREEN)✓ Release package created: release/R-$(R_VERSION)-$(ARCH_NAME)-Immutable-AppImage-release.tar.gz$(NC)"
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_NAME)" ]; then \
+		echo "Minimal build: Available (base R packages)" >> release/VERSION.txt; \
+	fi
+	@if [ -f "$(BUILD_DIR)/$(APPIMAGE_PACKAGES_NAME)" ]; then \
+		echo "Packages build: Available (pre-installed packages)" >> release/VERSION.txt; \
+		echo "Pre-installed packages: $(PREINSTALLED_PACKAGES)" >> release/VERSION.txt; \
+	fi
+	@echo "Package installation: Disabled (immutable AppImage)" >> release/VERSION.txt
+	@tar -czf release/R-$(R_VERSION)-$(ARCH_NAME)-AppImage-release.tar.gz -C release .
+	@echo "$(GREEN)[OK] Release package created: release/R-$(R_VERSION)-$(ARCH_NAME)-AppImage-release.tar.gz$(NC)"
 	@ls -lh release/
 
 # Show disk usage
@@ -480,10 +609,14 @@ disk-usage:
 		echo "No build directory found"; \
 	fi
 
-# Force rebuild (clean and build)
+# Force rebuild minimal (clean and build)
 .PHONY: rebuild
 rebuild: clean appimage
 
-# Force complete rebuild (clean-all and build)
+# Force rebuild packages (clean and build)
+.PHONY: rebuild-packages
+rebuild-packages: clean appimage-packages
+
+# Force complete rebuild (clean-all and build both)
 .PHONY: rebuild-all
-rebuild-all: clean-all appimage
+rebuild-all: clean-all appimage appimage-packages

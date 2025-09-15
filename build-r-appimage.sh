@@ -1,11 +1,48 @@
 #!/bin/bash
 
-# R AppImage Builder Script with Pre-installed Packages
+# R AppImage builder Script with Optional Pre-installed Packages
 # This script creates a portable R AppImage for Linux distributions
 # Supports both x86_64 and aarch64 architectures
-# Includes official R logo, pre-configured repositories, and pre-installed packages
 
 set -e
+
+# Command line options
+BUILD_MODE="minimal"  # Default to minimal build
+SKIP_PACKAGES=true    # Default to skipping packages
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --with-packages)
+            BUILD_MODE="packages"
+            SKIP_PACKAGES=false
+            shift
+            ;;
+        --minimal)
+            BUILD_MODE="minimal"
+            SKIP_PACKAGES=true
+            shift
+            ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --minimal        Build minimal R AppImage (default)"
+            echo "  --with-packages  Build with pre-installed packages (immutable)"
+            echo "  --help          Show this help message"
+            echo ""
+            echo "Environment variables:"
+            echo "  R_VERSION       R version to build (default: 4.5.1)"
+            echo ""
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
 
 # Detect architecture
 ARCH=$(uname -m)
@@ -25,11 +62,15 @@ esac
 
 # Configuration
 R_VERSION="${R_VERSION:-4.5.1}"
-APPIMAGE_NAME="R-${R_VERSION}-${ARCH_NAME}.AppImage"
+if [ "$BUILD_MODE" = "packages" ]; then
+    APPIMAGE_NAME="R-${R_VERSION}-${ARCH_NAME}-packages.AppImage"
+else
+    APPIMAGE_NAME="R-${R_VERSION}-${ARCH_NAME}.AppImage"
+fi
 BUILD_DIR="$(pwd)/build"
 APPDIR="${BUILD_DIR}/R.AppDir"
 
-# Pre-installed packages configuration
+# Pre-installed packages configuration (only used with --with-packages)
 # Add or remove packages as needed
 PREINSTALLED_PACKAGES=(
     "jsonlite"
@@ -205,8 +246,13 @@ build_r() {
     log_success "R built and installed to AppDir for ${ARCH_NAME}"
 }
 
-# Install R packages during build
+# Install R packages during build (only if not skipping packages)
 install_r_packages() {
+    if [ "$SKIP_PACKAGES" = true ]; then
+        log_info "Skipping package installation (minimal build)"
+        return 0
+    fi
+    
     log_info "Installing pre-configured R packages..."
     
     if [ ${#PREINSTALLED_PACKAGES[@]} -eq 0 ]; then
@@ -308,9 +354,9 @@ EOF
     log_info "Total packages in library: $((pkg_count - 1))" # Subtract 1 for the library dir itself
 }
 
-# Create R profile with immutable configuration
+# Create R profile
 create_r_profile() {
-    log_info "Creating R profile with immutable configuration..."
+    log_info "Creating R profile..."
     
     local r_etc_dir="${APPDIR}/usr/lib/R/etc"
     local rprofile_site="${r_etc_dir}/Rprofile.site"
@@ -318,15 +364,15 @@ create_r_profile() {
     # Ensure the etc directory exists
     mkdir -p "${r_etc_dir}"
     
-    # Create list of pre-installed packages for display
-    local packages_list=""
-    for pkg in "${PREINSTALLED_PACKAGES[@]}"; do
-        packages_list="$packages_list\"$pkg\", "
-    done
-    packages_list=${packages_list%, }  # Remove trailing comma and space
-    
-    # Create Rprofile.site with immutable configuration
-    cat > "${rprofile_site}" << EOF
+        # Create list of pre-installed packages for display
+        local packages_list=""
+        for pkg in "${PREINSTALLED_PACKAGES[@]}"; do
+            packages_list="$packages_list\"$pkg\", "
+        done
+        packages_list=${packages_list%, }  # Remove trailing comma and space
+        
+        # Create Rprofile.site with immutable configuration
+        cat > "${rprofile_site}" << EOF
 # Rprofile.site for R AppImage
 # This file is executed at R startup
 
@@ -344,9 +390,9 @@ local({
 # Override install.packages to prevent installation
 install.packages <- function(...) {
     cat("\\n")
-    cat("════════════════════════════════════════════════════════════════\\n")
+    cat("═══════════════════════════════════════════════════════════\\n")
     cat("    This is an immutable R AppImage environment\\n")
-    cat("════════════════════════════════════════════════════════════════\\n")
+    cat("═══════════════════════════════════════════════════════════\\n")
     cat("\\n")
     cat("Package installation is disabled to maintain consistency.\\n")
     cat("\\n")
@@ -368,9 +414,9 @@ install.packages <- function(...) {
     cat("\\n")
     cat("Need different packages? Build a custom AppImage with:\\n")
     cat("   > Edit PREINSTALLED_PACKAGES in build script\\n")
-    cat("   > Run: make rebuild-all\\n")
+    cat("   > Run: make appimage-packages\\n")
     cat("\\n")
-    cat("════════════════════════════════════════════════════════════════\\n")
+    cat("═══════════════════════════════════════════════════════════\\n")
     cat("\\n")
 }
 
@@ -411,7 +457,7 @@ show.available.packages <- function() {
 if (interactive()) {
     cat("\\n")
     cat("R AppImage - Immutable Environment\\n")
-    cat("═══════════════════════════════════════\\n")
+    cat("════════════════════════════════════\\n")
     cat("R Version:", R.version.string, "\\n")
     cat("Architecture: ${ARCH_NAME}\\n")
     cat("Pre-installed packages:", length(.preinstalled_packages), "\\n")
@@ -421,8 +467,8 @@ if (interactive()) {
     cat("\\n")
 }
 EOF
-    
-    log_success "R profile created with immutable configuration"
+
+    log_success "R profile created for packages build"
 }
 
 # Copy required libraries
@@ -495,7 +541,7 @@ copy_libraries() {
 create_desktop_file() {
     log_info "Creating desktop file..."
     
-    cat > "${APPDIR}/usr/share/applications/R.desktop" << 'EOF'
+        cat > "${APPDIR}/usr/share/applications/R.desktop" << 'EOF'
 [Desktop Entry]
 Version=1.0
 Type=Application
@@ -592,76 +638,35 @@ create_icon() {
     cd - > /dev/null
 }
 
-# Create AppRun script using AppImage's built-in $APPDIR
+# Create AppRun script
 create_apprun() {
     log_info "Creating AppRun script..."
     
     cat > "${APPDIR}/AppRun" << 'EOF'
 #!/bin/bash
 
-# AppRun script for R AppImage (Immutable Environment)
-# Uses AppImage's built-in $APPDIR environment variable
+# AppRun script for R AppImage
+# Get the directory where this script is located
+HERE="$(dirname "$(readlink -f "$0")")"
 
-# The AppImage runtime sets $APPDIR to the mounted filesystem root
-# e.g., /tmp/.mount_R-4.5.7JgTVP
-# This is different from the build-time APPDIR variable!
-
-# Clear any existing R environment variables to avoid conflicts
+# Clear any existing R environment variables to avoid conflicts and warnings
 unset R_HOME R_LIBS_USER R_SHARE_DIR R_INCLUDE_DIR R_DOC_DIR R_LIBS R_ENVIRON R_PROFILE
 
-# Debug: Show AppImage environment (comment out for production)
-# echo "DEBUG: APPDIR (mounted filesystem): $APPDIR" >&2
-# echo "DEBUG: APPIMAGE (file path): $APPIMAGE" >&2
-
-# Verify the AppImage environment variable is set
-if [ -z "$APPDIR" ]; then
-    echo "ERROR: APPDIR environment variable not set" >&2
-    echo "This script must be run from within an AppImage" >&2
-    exit 1
-fi
-
-# Verify critical directories exist
-if [ ! -d "$APPDIR/usr/lib/R" ]; then
-    echo "ERROR: R installation not found at $APPDIR/usr/lib/R" >&2
-    echo "AppImage may be corrupted or built incorrectly" >&2
-    ls -la "$APPDIR/usr/" >&2 || true
-    exit 1
-fi
-
-if [ ! -x "$APPDIR/usr/bin/R" ]; then
-    echo "ERROR: R binary not found or not executable at $APPDIR/usr/bin/R" >&2
-    exit 1
-fi
-
-# Set up environment using AppImage's mounted filesystem
-export PATH="$APPDIR/usr/bin:${PATH}"
-export LD_LIBRARY_PATH="$APPDIR/usr/lib:${LD_LIBRARY_PATH}"
-
-# CRITICAL: Set R_HOME to the AppImage mounted location
-export R_HOME="$APPDIR/usr/lib/R"
+# Set up environment for AppImage R
+export PATH="${HERE}/usr/bin:${PATH}"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+export R_HOME="${HERE}/usr/lib/R"
 
 # Use only the built-in library (no user library for immutable environment)
-export R_LIBS="$APPDIR/usr/lib/R/library"
-export R_LIBS_SITE="$APPDIR/usr/lib/R/site-library"
+export R_LIBS="${HERE}/usr/lib/R/library"
 
-# Ensure R can find its resources in the AppImage
-export R_SHARE_DIR="$APPDIR/usr/share/R/share"
-export R_INCLUDE_DIR="$APPDIR/usr/share/R/include" 
-export R_DOC_DIR="$APPDIR/usr/share/R/doc"
+# Ensure R can find its resources
+export R_SHARE_DIR="${HERE}/usr/share/R/share"
+export R_INCLUDE_DIR="${HERE}/usr/share/R/include"
+export R_DOC_DIR="${HERE}/usr/share/R/doc"
 
-# Set up additional paths that R might need
-export R_ENVIRON_USER=""  # Disable user environ file
-export R_PROFILE_USER=""  # Disable user profile file
-
-# Verify R can find its critical files
-if [ ! -f "$R_HOME/etc/Renviron" ]; then
-    echo "WARNING: R environment file not found at $R_HOME/etc/Renviron" >&2
-    echo "Available files in $R_HOME/etc/:" >&2
-    ls -la "$R_HOME/etc/" >&2 || true
-fi
-
-# Launch R from the AppImage with any arguments passed
-exec "$APPDIR/usr/bin/R" "$@"
+# Launch R with any arguments passed
+exec "${HERE}/usr/bin/R" "$@"
 EOF
     
     chmod +x "${APPDIR}/AppRun"
@@ -743,26 +748,39 @@ show_summary() {
     log_info "================================================================"
     log_success "R AppImage Build Summary"
     log_info "================================================================"
+    log_info "Build Mode: ${BUILD_MODE}"
     log_info "Architecture: ${ARCH_NAME}"
     log_info "R Version: ${R_VERSION}"
     log_info "AppImage: ${BUILD_DIR}/${APPIMAGE_NAME}"
-    log_info "Pre-installed packages: ${#PREINSTALLED_PACKAGES[@]}"
+    
+    if [ "$SKIP_PACKAGES" = false ]; then
+        log_info "Pre-installed packages: ${#PREINSTALLED_PACKAGES[@]}"
+    fi
+
+    log_info "Package installation: Disabled (immutable)"
+
     
     if [ -f "${BUILD_DIR}/${APPIMAGE_NAME}" ]; then
         local size=$(du -h "${BUILD_DIR}/${APPIMAGE_NAME}" | cut -f1)
         log_info "Size: ${size}"
     fi
     
-    log_info ""
-    log_info "[PACKAGES] Pre-installed packages:"
-    printf '  %s\n' "${PREINSTALLED_PACKAGES[@]}" | sort
+    if [ "$SKIP_PACKAGES" = false ]; then
+        log_info ""
+        log_info "[PACKAGES] Pre-installed packages:"
+        printf '  %s\n' "${PREINSTALLED_PACKAGES[@]}" | sort
+    fi
     
     log_info ""
     log_info "Usage examples:"
     log_info "  Interactive R:     ./${APPIMAGE_NAME}"
     log_info "  Run script:        ./${APPIMAGE_NAME} script.R"
     log_info "  Batch mode:        ./${APPIMAGE_NAME} --slave -e \"print('Hello')\""
-    log_info "  Show packages:     ./${APPIMAGE_NAME} -e \"show.available.packages()\""
+    
+    if [ "$SKIP_PACKAGES" = false ]; then
+        log_info "  Show packages:     ./${APPIMAGE_NAME} -e \"show.available.packages()\""
+    fi
+    
     log_info ""
     log_info "System integration:"
     log_info "  Install to PATH:   make install"
@@ -773,10 +791,19 @@ show_summary() {
 # Main function
 main() {
     log_info "Starting R AppImage build process..."
+    log_info "Build Mode: ${BUILD_MODE}"
     log_info "Target Architecture: ${ARCH_NAME}"
     log_info "R Version: ${R_VERSION}"
     log_info "Build directory: ${BUILD_DIR}"
-    log_info "Pre-installing ${#PREINSTALLED_PACKAGES[@]} packages"
+    
+    if [ "$SKIP_PACKAGES" = false ]; then
+        log_info "Pre-installing ${#PREINSTALLED_PACKAGES[@]} packages"
+    else
+        log_info "Building with base R packages only"
+    fi
+    
+    log_info "Environment: Immutable (AppImage read-only filesystem)"
+    
     log_info "Timestamp: $(date)"
     
     check_dependencies
