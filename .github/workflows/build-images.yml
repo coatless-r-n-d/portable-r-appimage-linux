@@ -1,3 +1,9 @@
+# Build R AppImages for multiple architectures
+# This workflow builds R AppImages for x86_64 and aarch64 architectures
+# It runs on GitHub-hosted Ubuntu runners (24.04 and 24.04-arm)
+# The resulting AppImages and build summaries are uploaded as artifacts
+# Optionally, a GitHub Release can be created with the built AppImages
+
 name: Build R AppImage
 
 on:
@@ -152,12 +158,28 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v5
       with:
         path: artifacts
+
+    - name: Set release environment variables
+      run: |
+        # Set build date
+        echo "BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_ENV
+        
+        # Extract tag name
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+        else
+          TAG_NAME="r-appimage-${{ env.R_VERSION }}-$(date +'%Y%m%d-%H%M%S')"
+        fi
+        echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+        
+        # Set download URLs
+        echo "DOWNLOAD_BASE_URL=https://github.com/${{ github.repository }}/releases/download/$TAG_NAME" >> $GITHUB_ENV
 
     - name: Prepare release assets
       run: |
@@ -166,7 +188,7 @@ jobs:
         # Copy AppImages and summaries from artifacts
         find artifacts -name "*.AppImage" -exec cp {} release-assets/ \;
         find artifacts -name "build-summary-*.txt" -exec cp {} release-assets/ \;
-        
+              
         # Verify we have both architectures
         echo "Checking for required AppImages:"
         x86_64_found=false
@@ -195,7 +217,7 @@ jobs:
         echo "========================" >> release-assets/README.txt
         echo "" >> release-assets/README.txt
         echo "R Version: ${{ env.R_VERSION }}" >> release-assets/README.txt
-        echo "Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> release-assets/README.txt
+        echo "Build Date: ${{ env.BUILD_DATE }}" >> release-assets/README.txt
         echo "Repository: ${{ github.repository }}" >> release-assets/README.txt
         echo "Commit: ${{ github.sha }}" >> release-assets/README.txt
         echo "" >> release-assets/README.txt
@@ -222,18 +244,9 @@ jobs:
         echo "" >> release-assets/README.txt
         echo "This is an immutable R environment with pre-installed packages." >> release-assets/README.txt
         echo "Package installation is disabled to maintain consistency." >> release-assets/README.txt
-        
+
         echo "Final release assets:"
         ls -la release-assets/
-
-    - name: Extract tag name
-      run: |
-        if [[ $GITHUB_REF == refs/tags/* ]]; then
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-        else
-          TAG_NAME="r-appimage-${{ env.R_VERSION }}-$(date +'%Y%m%d-%H%M%S')"
-        fi
-        echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
@@ -243,8 +256,34 @@ jobs:
         body: |
           # R AppImage ${{ env.R_VERSION }}
           
-          Immutable R environment with pre-installed packages for multiple architectures.
+          AppImage version of R with pre-installed packages for multiple architectures on Linux.
+                    
+          ## Quick Download
           
+          **x86_64 (Intel/AMD 64-bit):**
+
+          ```bash
+          # Download with wget
+          wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-x86_64.AppImage
+          
+          # Download with curl
+          curl -L -O ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-x86_64.AppImage
+
+          chmod +x R-${{ env.R_VERSION }}-x86_64.AppImage && ./R-${{ env.R_VERSION }}-x86_64.AppImage
+          ```
+          
+          **aarch64 (ARM 64-bit):**
+
+          ```bash
+          # Download with wget
+          wget ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-aarch64.AppImage
+          
+          # Download with curl
+          curl -L -O ${{ env.DOWNLOAD_BASE_URL }}/R-${{ env.R_VERSION }}-aarch64.AppImage
+          
+          chmod +x R-${{ env.R_VERSION }}-aarch64.AppImage && ./R-${{ env.R_VERSION }}-aarch64.AppImage
+          ```
+
           ## Features
           - R ${{ env.R_VERSION }} built from source
           - Pre-installed packages for data science and statistics
@@ -253,17 +292,20 @@ jobs:
           - Multi-architecture support (x86_64, aarch64)
           
           ## Usage
-          1. Download the appropriate AppImage for your architecture
+
+          1. Download the appropriate AppImage for your architecture (see commands above)
           2. Make it executable: `chmod +x R-*.AppImage`
           3. Run: `./R-*.AppImage`
           
           ## Available Packages
+
           The AppImage includes pre-installed packages: jsonlite, httr, ggplot2, dplyr, tidyr, readr, stringr, lubridate, shiny, rmarkdown, knitr, devtools, data.table, plotly, DT
           
           ## Notes
+
           - This is an immutable environment - package installation is disabled
           - Use `show.available.packages()` to see all included packages
-          - Built on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          - Built on: ${{ env.BUILD_DATE }}
           - Commit: ${{ github.sha }}
         files: release-assets/*
         draft: false
