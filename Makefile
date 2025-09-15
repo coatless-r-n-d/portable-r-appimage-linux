@@ -113,6 +113,7 @@ deps-ubuntu:
 		wget \
 		file \
 		desktop-file-utils \
+		appstream-util \
 		libreadline-dev \
 		libcurl4-openssl-dev \
 		libssl-dev \
@@ -162,6 +163,7 @@ deps-fedora:
 		wget \
 		file \
 		desktop-file-utils \
+		appstream-util \
 		readline-devel \
 		libcurl-devel \
 		openssl-devel \
