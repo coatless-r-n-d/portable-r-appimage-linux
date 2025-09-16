@@ -48,7 +48,7 @@ env:
 
 jobs:
   build:
-    name: Build R AppImage (${{ matrix.build_type }})
+    name: Build R AppImage (${{ matrix.build_type }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
