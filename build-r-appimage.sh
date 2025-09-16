@@ -74,7 +74,7 @@ APPDIR="${BUILD_DIR}/R.AppDir"
 # Add or remove packages as needed
 PREINSTALLED_PACKAGES=(
     "jsonlite"
-    "httr"
+    "httr2"
     "ggplot2"
     "dplyr"
     "tidyr"
@@ -163,6 +163,32 @@ download_appimagetool() {
     log_success "appimagetool ready for ${ARCH_NAME}"
 }
 
+# Download linuxdeploy tool
+download_linuxdeploy() {
+    log_info "Downloading linuxdeploy for ${ARCH_NAME}..."
+    
+    if [ ! -f "${BUILD_DIR}/linuxdeploy" ]; then
+        mkdir -p "${BUILD_DIR}"
+        cd "${BUILD_DIR}"
+        
+        # Download architecture-specific linuxdeploy
+        case $ARCH_NAME in
+            x86_64)
+                wget -O linuxdeploy "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+                ;;
+            aarch64)
+                wget -O linuxdeploy "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage"
+                ;;
+        esac
+        
+        chmod +x linuxdeploy
+        cd - > /dev/null
+    fi
+    
+    log_success "linuxdeploy ready for ${ARCH_NAME}"
+}
+
+
 # Create AppDir structure
 create_appdir_structure() {
     log_info "Creating AppDir structure for ${ARCH_NAME}..."
@@ -173,7 +199,7 @@ create_appdir_structure() {
     log_success "AppDir structure created"
 }
 
-# Build R from source
+# Build R and install to temporary directory (not directly to AppDir)
 build_r() {
     log_info "Building R ${R_VERSION} from source for ${ARCH_NAME}..."
     
@@ -194,6 +220,11 @@ build_r() {
     cd "R-${R_VERSION}"
     
     log_info "Configuring R build for ${ARCH_NAME}..."
+    
+    # Create installation directory (separate from AppDir)
+    local install_dir="${BUILD_DIR}/R-install"
+    rm -rf "$install_dir"
+    mkdir -p "$install_dir"
     
     # IMPORTANT: Use /usr as prefix, not ${APPDIR}/usr to avoid hardcoded paths
     # We'll use DESTDIR during make install to redirect to AppDir
@@ -226,11 +257,11 @@ build_r() {
             export FFLAGS="${FFLAGS} -O2"
             ;;
     esac
-    
+
     log_info "Configure command: ./configure $config_args"
     ./configure $config_args
     
-    log_info "Compiling R (this may take a while - up to 3 hours on ARM64)..."
+    log_info "Compiling R (this may take a while - up to 20 minutes on ARM64)..."
     local nproc_count=$(nproc)
     # Limit parallel jobs on ARM64 to prevent memory issues
     if [ "$ARCH_NAME" = "aarch64" ] && [ "$nproc_count" -gt 2 ]; then
@@ -240,12 +271,12 @@ build_r() {
     
     make -j${nproc_count}
     
-    log_info "Installing R to AppDir using DESTDIR..."
-    # Use DESTDIR to redirect installation to AppDir while keeping relative paths
-    make install DESTDIR="${APPDIR}"
+    log_info "Installing R to temporary directory..."
+    # Use DESTDIR to redirect installation to install_dir while keeping relative paths
+    make install DESTDIR="${install_dir}"
     
     cd - > /dev/null
-    log_success "R built and installed to AppDir for ${ARCH_NAME}"
+    log_success "R built and installed for ${ARCH_NAME}"
 }
 
 # Install R packages during build (only if not skipping packages)
@@ -262,19 +293,73 @@ install_r_packages() {
         return 0
     fi
     
-    local r_binary="${APPDIR}/usr/bin/R"
-    local lib_dir="${APPDIR}/usr/lib/R/library"
+    local install_dir="${BUILD_DIR}/R-install"
+    local r_binary="${install_dir}/usr/bin/R"
+    local lib_dir="${install_dir}/usr/lib/R/library"
     
-    # Verify R is working
-    if ! "$r_binary" --version > /dev/null 2>&1; then
-        log_error "R binary not working. Cannot install packages."
-        exit 1
+    # [DEBUG] Check what we have as this goes wrong... (sometimes)
+    log_info "Checking R installation..."
+    log_info "R binary: $r_binary"
+    log_info "R binary exists: $([ -f "$r_binary" ] && echo "YES" || echo "NO")"
+    log_info "R binary executable: $([ -x "$r_binary" ] && echo "YES" || echo "NO")"
+    
+    if [ -f "$r_binary" ]; then
+        log_info "R binary type: $(file "$r_binary")"
+        if file "$r_binary" | grep -q "shell script"; then
+            log_info "R binary is a shell script, checking first few lines:"
+            head -5 "$r_binary" | sed 's/^/  /'
+        fi
     fi
     
-    # Set up temporary environment for package installation
-    export R_HOME="${APPDIR}/usr/lib/R"
-    export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
-    export PATH="${APPDIR}/usr/bin:${PATH}"
+    # Set up comprehensive environment for package installation
+    log_info "Setting up R environment for package installation..."
+    
+    # Clear any existing R environment that might interfere
+    unset R_HOME R_LIBS_USER R_SHARE_DIR R_INCLUDE_DIR R_DOC_DIR R_LIBS R_ENVIRON R_PROFILE
+    
+    # Set up R environment pointing to our temporary installation
+    export R_HOME="${install_dir}/usr/lib/R"
+    export R_LIBS_SITE="${lib_dir}"
+    export R_LIBS="${lib_dir}"
+    export R_SHARE_DIR="${install_dir}/usr/share/R/share"
+    export R_INCLUDE_DIR="${install_dir}/usr/share/R/include"
+    export R_DOC_DIR="${install_dir}/usr/share/R/doc"
+    
+    # Set up library paths so R can find its own libraries
+    local r_lib_path="${install_dir}/usr/lib/R/lib"
+    if [ -d "$r_lib_path" ]; then
+        export LD_LIBRARY_PATH="${r_lib_path}:${install_dir}/usr/lib:${LD_LIBRARY_PATH}"
+    else
+        export LD_LIBRARY_PATH="${install_dir}/usr/lib:${LD_LIBRARY_PATH}"
+    fi
+    
+    # Add R to PATH
+    export PATH="${install_dir}/usr/bin:${PATH}"
+    
+    # Verify R is working before proceeding
+    log_info "Testing R binary..."
+    if ! "$r_binary" --version > /dev/null 2>&1; then
+        log_error "R binary test failed. Attempting to diagnose..."
+        
+        # Try to get more detailed error information
+        log_info "Attempting to run R --version with error output:"
+        "$r_binary" --version 2>&1 | sed 's/^/  ERROR: /' || true
+        
+        # Check if it's a library issue
+        if command -v ldd >/dev/null 2>&1; then
+            local actual_r_binary
+            if [ -f "${install_dir}/usr/lib/R/bin/exec/R" ]; then
+                actual_r_binary="${install_dir}/usr/lib/R/bin/exec/R"
+                log_info "Checking dependencies of actual R binary: $actual_r_binary"
+                ldd "$actual_r_binary" 2>&1 | sed 's/^/  /' || true
+            fi
+        fi
+        
+        log_error "Cannot proceed with package installation - R binary not functional"
+        return 1
+    fi
+    
+    log_success "R binary is working"
     
     log_info "Installing ${#PREINSTALLED_PACKAGES[@]} packages..."
     
@@ -339,7 +424,9 @@ if (successful < total) {
 } else {
     quit(status = 0)
 }
+
 EOF
+    # Do not remove the last newline as it may cause issues
     
     log_info "Running package installation script..."
     if "$r_binary" --slave < "$install_script"; then
@@ -352,30 +439,163 @@ EOF
     rm -f "$install_script"
     
     # Show final package count
-    local pkg_count=$(find "${lib_dir}" -maxdepth 1 -type d | wc -l)
-    log_info "Total packages in library: $((pkg_count - 1))" # Subtract 1 for the library dir itself
+    if [ -d "${lib_dir}" ]; then
+        local pkg_count=$(find "${lib_dir}" -maxdepth 1 -type d | wc -l)
+        log_info "Total packages in library: $((pkg_count - 1))" # Subtract 1 for the library dir itself
+    fi
 }
 
 # Create R profile
 create_r_profile() {
     log_info "Creating R profile..."
     
-    local r_etc_dir="${APPDIR}/usr/lib/R/etc"
+    local install_dir="${BUILD_DIR}/R-install"
+    local r_etc_dir="${install_dir}/usr/lib/R/etc"
     local rprofile_site="${r_etc_dir}/Rprofile.site"
     
     # Ensure the etc directory exists
     mkdir -p "${r_etc_dir}"
     
-        # Create list of pre-installed packages for display
-        local packages_list=""
-        for pkg in "${PREINSTALLED_PACKAGES[@]}"; do
-            packages_list="$packages_list\"$pkg\", "
-        done
-        packages_list=${packages_list%, }  # Remove trailing comma and space
-        
-        # Create Rprofile.site with immutable configuration
-        cat > "${rprofile_site}" << EOF
-# Rprofile.site for R AppImage
+    # Create different profiles based on build mode
+    if [ "$SKIP_PACKAGES" = false ]; then
+        # Packages build profile
+        create_packages_profile "$rprofile_site"
+    else
+        # Minimal build profile
+        create_minimal_profile "$rprofile_site"
+    fi
+    
+    # Verify the file was created
+    if [ -f "$rprofile_site" ]; then
+        log_success "R profile created for ${BUILD_MODE} build: $rprofile_site"
+    else
+        log_error "Failed to create R profile file: $rprofile_site"
+        exit 1
+    fi
+}
+
+# Profile for minimal builds
+create_minimal_profile() {
+    local rprofile_site="$1"
+    
+    cat > "${rprofile_site}" << EOF
+# Rprofile.site for R AppImage (Minimal Build)
+# This file is executed at R startup
+
+# Set default repositories
+local({
+    r <- getOption("repos")
+    r["CRAN"] <- "https://cloud.r-project.org"
+    r["source"] <- "https://packagemanager.rstudio.com/all/latest"
+    options(repos = r)
+})
+
+# Override install.packages for minimal build
+install.packages <- function(...) {
+    cat("\\n")
+    cat("═══════════════════════════════════════════════════════════\\n")
+    cat("    R AppImage - Minimal Build Environment\\n")
+    cat("═══════════════════════════════════════════════════════════\\n")
+    cat("\\n")
+    cat("This is a minimal R AppImage with base packages only.\\n")
+    cat("Package installation is disabled (immutable filesystem).\\n")
+    cat("\\n")
+    cat("Available base packages:\\n")
+    cat("  Base R packages: base, utils, stats, graphics, etc.\\n")
+    cat("\\n")
+    cat("To see all available packages:\\n")
+    cat("   > library()\\n")
+    cat("   > installed.packages()[,\"Package\"]\\n")
+    cat("\\n")
+    cat("Need additional packages?\\n")
+    cat("   Build the packages version: make appimage-packages\\n")
+    cat("   Or use a system R installation for package management\\n")
+    cat("\\n")
+    cat("═══════════════════════════════════════════════════════════\\n")
+    cat("\\n")
+}
+
+# Override remove.packages and update.packages
+remove.packages <- function(...) {
+    cat("\\n[INFO] Package removal is disabled in this minimal AppImage environment.\\n\\n")
+}
+
+update.packages <- function(...) {
+    cat("\\n[INFO] Package updates are disabled in this minimal AppImage environment.\\n\\n")
+}
+
+# Helper function to show available packages for minimal build
+show.available.packages <- function() {
+    cat("\\nR AppImage - Minimal Build\\n")
+    cat("═══════════════════════════════\\n\\n")
+    
+    cat("This minimal build includes only base R packages.\\n\\n")
+    
+    # Show base packages
+    base_pkgs <- installed.packages()[, "Package"]
+    cat("Base R packages (", length(base_pkgs), " total):\\n")
+    
+    # Display in columns
+    packages_per_row <- 4
+    for (i in seq_along(base_pkgs)) {
+        cat(sprintf("  %-15s", base_pkgs[i]))
+        if (i %% packages_per_row == 0 || i == length(base_pkgs)) {
+            cat("\\n")
+        }
+    }
+    
+    cat("\\n")
+    cat("These packages are part of base R and always available.\\n")
+    cat("Use library(package_name) to load any of these packages.\\n\\n")
+    
+    cat("For additional packages, consider:\\n")
+    cat("  • Building the packages version: make appimage-packages\\n")
+    cat("  • Using a system R installation with package management\\n\\n")
+}
+
+# Helper function to show build info
+show.build.info <- function() {
+    cat("\\nR AppImage Build Information\\n")
+    cat("═══════════════════════════════\\n")
+    cat("Build Type: Minimal (base packages only)\\n")
+    cat("R Version:", R.version.string, "\\n")
+    cat("Architecture: ${ARCH_NAME}\\n")
+    cat("Filesystem: Immutable (read-only)\\n")
+    cat("Package Installation: Disabled\\n\\n")
+    
+    cat("Use show.available.packages() to see what's included.\\n\\n")
+}
+
+# Display minimal build startup message
+if (interactive()) {
+    cat("\\n")
+    cat("R AppImage - Minimal Build\\n")
+    cat("═══════════════════════════════\\n")
+    cat("R Version:", R.version.string, "\\n")
+    cat("Architecture: ${ARCH_NAME}\\n")
+    cat("Build: Base packages only\\n")
+    cat("\\n")
+    cat("Type 'show.available.packages()' to see available packages\\n")
+    cat("Type 'show.build.info()' for build information\\n")
+    cat("Package installation is disabled (immutable environment)\\n")
+    cat("\\n")
+}
+EOF
+}
+
+# Profile for packages builds (existing functionality)
+create_packages_profile() {
+    local rprofile_site="$1"
+    
+    # Create list of pre-installed packages for display
+    local packages_list=""
+    for pkg in "${PREINSTALLED_PACKAGES[@]}"; do
+        packages_list="$packages_list\"$pkg\", "
+    done
+    packages_list=${packages_list%, }  # Remove trailing comma and space
+    
+    cat > "${rprofile_site}" << EOF
+# Rprofile.site for R AppImage (Packages Build)
 # This file is executed at R startup
 
 # Set default repositories (for reference only)
@@ -393,10 +613,10 @@ local({
 install.packages <- function(...) {
     cat("\\n")
     cat("═══════════════════════════════════════════════════════════\\n")
-    cat("    This is an immutable R AppImage environment\\n")
+    cat("    R AppImage - Packages Build Environment\\n")
     cat("═══════════════════════════════════════════════════════════\\n")
     cat("\\n")
-    cat("Package installation is disabled to maintain consistency.\\n")
+    cat("Package installation is disabled (immutable filesystem).\\n")
     cat("\\n")
     cat("Pre-installed packages:\\n")
     
@@ -434,13 +654,15 @@ update.packages <- function(...) {
 
 # Helper function to show available packages
 show.available.packages <- function() {
-    cat("\\nPre-installed packages in this AppImage:\\n\\n")
+    cat("\\nR AppImage - Packages Build\\n")
+    cat("═══════════════════════════════\\n\\n")
     
     # Get actually installed packages
     installed <- installed.packages()[, "Package"]
     available_preinstalled <- intersect(.preinstalled_packages, installed)
     
     if (length(available_preinstalled) > 0) {
+        cat("Pre-installed packages:\\n")
         packages_per_row <- 3
         for (i in seq_along(available_preinstalled)) {
             cat(sprintf("  %-20s", available_preinstalled[i]))
@@ -452,104 +674,235 @@ show.available.packages <- function() {
     
     cat("\\n")
     cat("Total:", length(available_preinstalled), "pre-installed packages\\n")
-    cat("\\nUse library(package_name) to load a package.\\n\\n")
+    cat("Plus base R packages for a complete environment.\\n\\n")
+    cat("Use library(package_name) to load a package.\\n\\n")
+}
+
+# Helper function to show build info
+show.build.info <- function() {
+    cat("\\nR AppImage Build Information\\n")
+    cat("═══════════════════════════════\\n")
+    cat("Build Type: Packages (pre-configured)\\n")
+    cat("R Version:", R.version.string, "\\n")
+    cat("Architecture: ${ARCH_NAME}\\n")
+    cat("Pre-installed packages:", length(.preinstalled_packages), "\\n")
+    cat("Filesystem: Immutable (read-only)\\n")
+    cat("Package Installation: Disabled\\n\\n")
+    
+    cat("Use show.available.packages() to see what's included.\\n\\n")
 }
 
 # Display AppImage startup message
 if (interactive()) {
     cat("\\n")
-    cat("R AppImage - Immutable Environment\\n")
-    cat("════════════════════════════════════\\n")
+    cat("R AppImage - Packages Build\\n")
+    cat("════════════════════════════════\\n")
     cat("R Version:", R.version.string, "\\n")
     cat("Architecture: ${ARCH_NAME}\\n")
     cat("Pre-installed packages:", length(.preinstalled_packages), "\\n")
     cat("\\n")
     cat("Type 'show.available.packages()' to see all packages\\n")
-    cat("Package installation is disabled for consistency\\n")
+    cat("Type 'show.build.info()' for build information\\n")
+    cat("Package installation is disabled (immutable filesystem).\\n")
     cat("\\n")
 }
 EOF
-
-    log_success "R profile created for packages build"
 }
 
-# Copy required libraries
-copy_libraries() {
-    log_info "Copying required shared libraries for ${ARCH_NAME}..."
+# Use linuxdeploy to bundle everything into AppDir
+bundle_with_linuxdeploy() {
+    log_info "Using linuxdeploy to bundle R and dependencies..."
     
-    # Create lib directories
-    mkdir -p "${APPDIR}/usr/lib"
+    cd "${BUILD_DIR}"
     
-    # Find and copy shared libraries that R depends on
-    log_info "Analyzing R dependencies..."
+    local install_dir="${BUILD_DIR}/R-install"
     
-    # Get list of shared libraries R needs
-    local r_binary="${APPDIR}/usr/bin/R"
-    local r_lib="${APPDIR}/usr/lib/R/bin/exec/R"
+    # Find the actual R binaries (not shell script wrappers)
+    log_info "Locating R binaries..."
     
-    # Check both R wrapper and actual R binary
-    local binaries=("$r_binary")
-    if [ -f "$r_lib" ]; then
-        binaries+=("$r_lib")
+    # Check what type of files we have
+    local r_wrapper="${install_dir}/usr/bin/R"
+    local rscript_wrapper="${install_dir}/usr/bin/Rscript"
+    local r_binary="${install_dir}/usr/lib/R/bin/exec/R"
+    local rscript_binary="${install_dir}/usr/lib/R/bin/Rscript"
+    
+    # Check R's internal library directory
+    local r_lib_dir="${install_dir}/usr/lib/R/lib"
+    log_info "R library directory: $r_lib_dir"
+    if [ -d "$r_lib_dir" ]; then
+        log_info "R internal libraries found:"
+        ls -la "$r_lib_dir" | sed 's/^/   /'
     fi
     
-    local all_libs=()
-    for binary in "${binaries[@]}"; do
-        if [ -f "$binary" ]; then
-            local libs=($(ldd "$binary" 2>/dev/null | grep "=>" | awk '{print $3}' | grep -v "^$" || true))
-            all_libs+=("${libs[@]}")
-        fi
-    done
+    # Determine which executables to deploy
+    local executables_to_deploy=()
+    local libraries_to_deploy=()
     
-    # Remove duplicates
-    local unique_libs=($(printf '%s\n' "${all_libs[@]}" | sort -u))
+    # Use actual ELF binaries, not shell script wrappers
+    if [ -f "$r_binary" ] && file "$r_binary" | grep -q "ELF"; then
+        executables_to_deploy+=("$r_binary")
+        log_info "Will deploy R binary: $r_binary"
+    else
+        log_warning "R binary not found or not ELF format: $r_binary"
+    fi
     
-    # Copy essential libraries (skip system libraries that should be available everywhere)
-    local skip_patterns="linux-vdso|ld-linux|libc\.|libm\.|libdl\.|librt\.|libpthread\.|libresolv\.|libnss_|libutil\.|libcrypt\.|libX11\.|libXt\.|libXext\.|libXmu\."
+    if [ -f "$rscript_binary" ] && file "$rscript_binary" | grep -q "ELF"; then
+        executables_to_deploy+=("$rscript_binary")
+        log_info "Will deploy Rscript binary: $rscript_binary"
+    else
+        log_warning "Rscript binary not found or not ELF format: $rscript_binary"
+    fi
     
-    for lib in "${unique_libs[@]}"; do
-        if [[ -f "$lib" ]] && ! echo "$lib" | grep -E "$skip_patterns" > /dev/null; then
-            local libname=$(basename "$lib")
-            if [ ! -f "${APPDIR}/usr/lib/$libname" ]; then
-                log_info "Copying $libname"
-                cp "$lib" "${APPDIR}/usr/lib/"
+    # Find R-specific libraries that need to be bundled
+    if [ -d "$r_lib_dir" ]; then
+        for lib in "$r_lib_dir"/*.so*; do
+            if [ -f "$lib" ]; then
+                libraries_to_deploy+=("$lib")
+                log_info "Found R library: $(basename "$lib")"
             fi
-        fi
+        done
+    fi
+    
+    # Check for additional R binaries in lib/R/bin/
+    local r_bin_dir="${install_dir}/usr/lib/R/bin"
+    if [ -d "$r_bin_dir" ]; then
+        for binary in "$r_bin_dir"/*; do
+            if [ -f "$binary" ] && file "$binary" | grep -q "ELF" && [[ "$(basename "$binary")" != "R" ]] && [[ "$(basename "$binary")" != "Rscript" ]]; then
+                executables_to_deploy+=("$binary")
+                log_info "Found additional R binary: $binary"
+            fi
+        done
+    fi
+    
+    if [ ${#executables_to_deploy[@]} -eq 0 ]; then
+        log_error "No ELF binaries found to deploy!"
+        exit 1
+    fi
+    
+    # Set up environment for linuxdeploy to find R libraries
+    log_info "Setting up library paths for linuxdeploy..."
+    export LD_LIBRARY_PATH="${r_lib_dir}:${install_dir}/usr/lib:${LD_LIBRARY_PATH}"
+    
+    # Disable stripping to avoid newer ELF format warnings
+    export DISABLE_COPYRIGHT_FILES_DEPLOYMENT=1
+    export NO_STRIP=1
+    
+    # Run linuxdeploy to bundle everything
+    log_info "Running linuxdeploy to create AppDir..."
+    
+    # Build linuxdeploy command with all executables and libraries
+    # Note: Desktop file and icon are already created by dedicated functions
+    local linuxdeploy_cmd="./linuxdeploy --appdir \"${APPDIR}\""
+    
+    # Add executables
+    for exe in "${executables_to_deploy[@]}"; do
+        linuxdeploy_cmd="$linuxdeploy_cmd --executable \"$exe\""
     done
     
-    # Also check for architecture-specific library paths
-    case $ARCH_NAME in
-        aarch64)
-            local lib_paths=("/lib/aarch64-linux-gnu" "/usr/lib/aarch64-linux-gnu")
-            ;;
-        x86_64)
-            local lib_paths=("/lib/x86_64-linux-gnu" "/usr/lib/x86_64-linux-gnu")
-            ;;
-    esac
-    
-    # Copy some commonly needed libraries from system paths
-    for lib_path in "${lib_paths[@]}"; do
-        if [ -d "$lib_path" ]; then
-            for essential_lib in "libgfortran.so.*" "libquadmath.so.*" "libgomp.so.*"; do
-                find "$lib_path" -name "$essential_lib" -exec cp {} "${APPDIR}/usr/lib/" \; 2>/dev/null || true
-            done
-        fi
+    # Add R-specific libraries explicitly
+    for lib in "${libraries_to_deploy[@]}"; do
+        linuxdeploy_cmd="$linuxdeploy_cmd --library \"$lib\""
     done
     
-    log_success "Libraries copied for ${ARCH_NAME}"
+    # Add desktop file and icon (created by dedicated functions)
+    if [ -f "${APPDIR}/usr/share/applications/R.desktop" ]; then
+        linuxdeploy_cmd="$linuxdeploy_cmd --desktop-file \"${APPDIR}/usr/share/applications/R.desktop\""
+    fi
+    
+    if [ -f "${APPDIR}/usr/share/icons/hicolor/256x256/apps/R.png" ]; then
+        linuxdeploy_cmd="$linuxdeploy_cmd --icon-file \"${APPDIR}/usr/share/icons/hicolor/256x256/apps/R.png\""
+    fi
+    
+    log_info "Running: $linuxdeploy_cmd"
+    
+    # Run linuxdeploy and capture both stdout and stderr
+    local linuxdeploy_output
+    local linuxdeploy_exit_code
+    
+    if linuxdeploy_output=$(eval $linuxdeploy_cmd 2>&1); then
+        linuxdeploy_exit_code=0
+    else
+        linuxdeploy_exit_code=$?
+    fi
+    
+    # Display the output
+    echo "$linuxdeploy_output"
+    
+    # Check if this was a real failure or just strip warnings
+    local real_failure=false
+    if [ $linuxdeploy_exit_code -ne 0 ]; then
+        # Check if the failures are only strip-related
+        if echo "$linuxdeploy_output" | grep -q "ERROR.*Strip call failed" && \
+           echo "$linuxdeploy_output" | grep -q "unknown type.*section.*relr.dyn"; then
+            log_warning "linuxdeploy completed with strip warnings (newer ELF format)"
+            log_info "This is not a fatal error - libraries were deployed successfully"
+        else
+            real_failure=true
+        fi
+    fi
+    
+    if [ $linuxdeploy_exit_code -eq 0 ] || [ "$real_failure" = false ]; then
+        log_success "linuxdeploy completed successfully"
+    else
+        log_warning "linuxdeploy approach failed"
+        exit 1
+    fi
+    
+    # Copy additional R resources that linuxdeploy doesn't handle
+    log_info "Copying additional R resources..."
+    
+    # Copy the entire R installation structure
+    if [ -d "${install_dir}/usr/lib/R" ]; then
+        mkdir -p "${APPDIR}/usr/lib"
+        cp -r "${install_dir}/usr/lib/R" "${APPDIR}/usr/lib/"
+    fi
+
+    local source_profile="${install_dir}/usr/lib/R/etc/Rprofile.site"
+    if [ -f "$source_profile" ]; then
+        mkdir -p "${APPDIR}/usr/lib/R/etc"
+        cp "$source_profile" "${APPDIR}/usr/lib/R/etc/Rprofile.site"
+        log_info "Explicitly copied R profile"
+    fi
+    
+    # Copy R share directory
+    if [ -d "${install_dir}/usr/share/R" ]; then
+        mkdir -p "${APPDIR}/usr/share"
+        cp -r "${install_dir}/usr/share/R" "${APPDIR}/usr/share/"
+    fi
+    
+    # Copy the wrapper scripts to usr/bin (we need these for the AppRun)
+    mkdir -p "${APPDIR}/usr/bin"
+    if [ -f "$r_wrapper" ]; then
+        cp "$r_wrapper" "${APPDIR}/usr/bin/"
+        chmod +x "${APPDIR}/usr/bin/R"
+    fi
+    
+    if [ -f "$rscript_wrapper" ]; then
+        cp "$rscript_wrapper" "${APPDIR}/usr/bin/"
+        chmod +x "${APPDIR}/usr/bin/Rscript"
+    fi
+    
+    # Copy additional shared files
+    if [ -d "${install_dir}/usr/share/man" ]; then
+        mkdir -p "${APPDIR}/usr/share"
+        cp -r "${install_dir}/usr/share/man" "${APPDIR}/usr/share/"
+    fi
+    
+    log_success "linuxdeploy bundling completed"
 }
 
-# Create desktop file
+
 create_desktop_file() {
     log_info "Creating desktop file..."
     
-        cat > "${APPDIR}/usr/share/applications/R.desktop" << 'EOF'
+    # Create desktop file with proper AppImage naming
+    cat > "${APPDIR}/usr/share/applications/Rappimage.desktop" << 'EOF'
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=R (Immutable)
 Comment=R Statistical Computing Environment - Pre-configured
-Exec=R
+Exec=R.AppImage
 Icon=R
 Categories=Science;Math;
 Terminal=true
@@ -557,11 +910,11 @@ StartupNotify=true
 EOF
     
     # Copy desktop file to AppDir root (required by appimagetool)
-    cp "${APPDIR}/usr/share/applications/R.desktop" "${APPDIR}/R.desktop"
+    cp "${APPDIR}/usr/share/applications/Rappimage.desktop" "${APPDIR}/Rappimage.desktop"
     
     # Validate desktop file
     if command -v desktop-file-validate >/dev/null 2>&1; then
-        desktop-file-validate "${APPDIR}/usr/share/applications/R.desktop"
+        desktop-file-validate "${APPDIR}/usr/share/applications/Rappimage.desktop"
         log_success "Desktop file created and validated"
     else
         log_warning "desktop-file-validate not found, desktop file created but not validated"
@@ -594,9 +947,9 @@ create_icon() {
     fi
     
     # Convert SVG to PNG
-    if command -v convert >/dev/null 2>&1; then
+    if command -v magick >/dev/null 2>&1; then
         log_info "Converting SVG to PNG using ImageMagick..."
-        if convert -background transparent "Rlogo.svg" -resize 256x256 "$icon_path"; then
+        if magick -background transparent "Rlogo.svg" -resize 256x256 "$icon_path"; then
             log_success "Icon converted to PNG"
         else
             log_error "Failed to convert SVG to PNG"
@@ -640,7 +993,7 @@ create_icon() {
     cd - > /dev/null
 }
 
-# Create AppData metadata file
+
 create_appdata_file() {
     log_info "Creating AppData metadata file..."
     
@@ -659,11 +1012,11 @@ create_appdata_file() {
         package_info="<li>Base R packages only</li>"
     fi
     
-    # Create AppData XML file
-    cat > "${metainfo_dir}/Rappimage.appdata.xml" << EOF
+    # Create AppData XML file with proper AppImage naming
+    cat > "${metainfo_dir}/org.rappimage.Rappimage.appdata.xml" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-    <id>Rappimage</id>
+    <id>org.rappimage.Rappimage</id>
     <metadata_license>MIT</metadata_license>
     <project_license>GPL-2.0-or-later</project_license>
     <name>AppImage for R Statistical Computing</name>
@@ -688,11 +1041,13 @@ create_appdata_file() {
         </ul>
     </description>
     <launchable type="desktop-id">Rappimage.desktop</launchable>
-    <icon type="stock">R.png</icon>
+    <icon type="stock">R</icon>
     <url type="homepage">https://www.r-project.org</url>
     <url type="help">https://cran.r-project.org/manuals.html</url>
     <url type="faq">https://cran.r-project.org/faqs.html</url>
-    <developer>R AppImage was made by HJJB, LLC and the R Language was by R Core Team</developer>
+    <developer id="org.rappimage.rappimage">
+        <name>R AppImage Team</name>
+    </developer>
     <categories>
         <category>Science</category>
         <category>Math</category>
@@ -731,13 +1086,33 @@ EOF
 
     # Validate the AppData file if appstream-util is available
     if command -v appstream-util >/dev/null 2>&1; then
-        if appstream-util validate-relax "${metainfo_dir}/R.appdata.xml"; then
+        if appstream-util validate-relax "${metainfo_dir}/org.rappimage.Rappimage.appdata.xml"; then
             log_success "AppData file created and validated"
         else
             log_warning "AppData file created but validation failed"
         fi
     else
         log_success "AppData file created (install appstream-util for validation)"
+    fi
+}
+
+# Create .DirIcon
+create_diricon() {
+    log_info "Creating .DirIcon..."
+    
+    local root_icon_path="${APPDIR}/R.png"
+    local diricon_path="${APPDIR}/.DirIcon"
+    
+    if [ -f "$root_icon_path" ]; then
+        if cp "$root_icon_path" "$diricon_path"; then
+            log_success "Created .DirIcon"
+        else
+            log_error "Failed to create .DirIcon"
+            exit 1
+        fi
+    else
+        log_error "Root icon not found at $root_icon_path"
+        exit 1
     fi
 }
 
@@ -756,23 +1131,22 @@ HERE="$(dirname "$(readlink -f "$0")")"
 unset R_HOME R_LIBS_USER R_SHARE_DIR R_INCLUDE_DIR R_DOC_DIR R_LIBS R_ENVIRON R_PROFILE
 
 # Set up environment for AppImage R
-export PATH="${APPDIR}/usr/bin:${PATH}"
-export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
-
+export PATH="${HERE}/usr/bin:${PATH}"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
 # Use only the built-in library (no user library for immutable environment)
-export R_LIBS="${APPDIR}/usr/lib/R/library"
+export R_LIBS="${HERE}/usr/lib/R/library"
 
 # Ensure R can find its resources
-export R_SHARE_DIR="${APPDIR}/usr/share/R/share"
-export R_INCLUDE_DIR="${APPDIR}/usr/share/R/include"
-export R_DOC_DIR="${APPDIR}/usr/share/R/doc"
+export R_SHARE_DIR="${HERE}/usr/share/R/share"
+export R_INCLUDE_DIR="${HERE}/usr/share/R/include"
+export R_DOC_DIR="${HERE}/usr/share/R/doc"
+export R_PROFILE="${HERE}/usr/lib/R/etc/Rprofile.site"
 
 # Launch R with any arguments passed
 exec "${HERE}/usr/bin/R" "$@"
 EOF
     
     chmod +x "${APPDIR}/AppRun"
-    
     log_success "AppRun script created"
 }
 
@@ -875,12 +1249,12 @@ show_summary() {
     
     log_info ""
     log_info "Usage examples:"
-    log_info "  Interactive R:     ./${APPIMAGE_NAME}"
-    log_info "  Run script:        ./${APPIMAGE_NAME} script.R"
-    log_info "  Batch mode:        ./${APPIMAGE_NAME} --slave -e \"print('Hello')\""
+    log_info "  Interactive R:     ./build/${APPIMAGE_NAME}"
+    log_info "  Run script:        ./build/${APPIMAGE_NAME} script.R"
+    log_info "  Batch mode:        ./build/${APPIMAGE_NAME} --slave -e \"print('Hello')\""
     
     if [ "$SKIP_PACKAGES" = false ]; then
-        log_info "  Show packages:     ./${APPIMAGE_NAME} -e \"show.available.packages()\""
+        log_info "  Show packages:     ./build/${APPIMAGE_NAME} -e \"show.available.packages()\""
     fi
     
     log_info ""
@@ -908,22 +1282,23 @@ main() {
     
     log_info "Timestamp: $(date)"
     
-    check_dependencies
-    download_appimagetool
-    create_appdir_structure
-    build_r
-    install_r_packages
-    create_r_profile
-    copy_libraries
-    create_desktop_file
-    create_appdata_file
-    create_icon
-    create_apprun
-    create_diricon
-    build_appimage
-    test_appimage
-    show_summary
-    
+    check_dependencies      # Check for required tools
+    download_appimagetool   # Download appimagetool
+    download_linuxdeploy    # Download linuxdeploy
+    create_appdir_structure # Create AppDir structure
+    build_r                 # Build and install R
+    install_r_packages      # Install R packages if not skipped
+    create_r_profile        # Create Rprofile.site based on build mode
+    bundle_with_linuxdeploy # Use linuxdeploy to bundle R and dependencies
+    create_desktop_file     # Create desktop file in AppDir
+    create_icon             # Download and create icon
+    create_appdata_file     # Create AppData metadata
+    create_diricon          # Create .DirIconf
+    create_apprun           # Custom AppRun after linuxdeploy
+    build_appimage          # Build the final AppImage
+    test_appimage           # Test the AppImage
+    show_summary            # Show build summary
+
     log_success "R AppImage build completed for ${ARCH_NAME}!"
 }
 

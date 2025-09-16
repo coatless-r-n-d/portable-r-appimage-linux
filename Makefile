@@ -21,7 +21,7 @@ APPIMAGE_PACKAGES_NAME = R-$(R_VERSION)-$(ARCH_NAME)-packages.AppImage
 SCRIPT_NAME = build-r-appimage.sh
 
 # Pre-installed packages (only used with appimage-packages target)
-PREINSTALLED_PACKAGES = jsonlite httr ggplot2 dplyr tidyr readr stringr lubridate shiny rmarkdown knitr devtools data.table plotly DT
+PREINSTALLED_PACKAGES = jsonlite httr2 ggplot2 dplyr tidyr readr stringr lubridate shiny rmarkdown knitr devtools data.table plotly DT
 
 # Colors for output
 GREEN = \033[0;32m
